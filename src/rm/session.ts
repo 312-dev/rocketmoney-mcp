@@ -13,8 +13,11 @@ import { dirname, join } from "node:path";
 // the session dies and must be re-seeded with a fresh cookie pasted into the
 // /auth page. `RefreshAuthToken` (see client.ts) keeps it warm until then.
 
-const STATE_DIR = process.env.ROCKETMONEY_STATE_DIR ?? "/data/rocketmoney";
-const SESSION_FILE = join(STATE_DIR, "session.json");
+// Resolved lazily (not a module const) so the state dir can be swapped per
+// process/test via ROCKETMONEY_STATE_DIR without re-importing the module.
+function sessionFile(): string {
+  return join(process.env.ROCKETMONEY_STATE_DIR ?? "/data/rocketmoney", "session.json");
+}
 
 export type CookieJar = Map<string, string>;
 
@@ -33,15 +36,16 @@ function ensureDir(file: string): void {
 
 function readRow(): SessionRow | null {
   try {
-    return JSON.parse(readFileSync(SESSION_FILE, "utf8")) as SessionRow;
+    return JSON.parse(readFileSync(sessionFile(), "utf8")) as SessionRow;
   } catch {
     return null;
   }
 }
 
 function writeRow(row: SessionRow): void {
-  ensureDir(SESSION_FILE);
-  writeFileSync(SESSION_FILE, JSON.stringify(row, null, 2));
+  const file = sessionFile();
+  ensureDir(file);
+  writeFileSync(file, JSON.stringify(row, null, 2));
 }
 
 /** Parse a `name=value; name2=value2` Cookie header string into a jar. */
