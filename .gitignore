@@ -1,5 +1,7 @@
 node_modules/
-dist/
+# dist/ is committed on purpose: the mcp-gateway image COPYs prebuilt dist/ and
+# runs only `npm ci --production` (no tsc in the image). Keep dist/ in sync via
+# `npm run build` before committing.
 .state/
 *.log
 .DS_Store
