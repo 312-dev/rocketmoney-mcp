@@ -48,11 +48,11 @@ interface GraphQLBody {
 }
 
 /**
- * Execute one persisted-query GraphQL request with the live cookie jar, rotate
- * the jar from the response's Set-Cookie headers, and persist it. Throws
+ * Core executor: POST a full GraphQL body with the live cookie jar, rotate the
+ * jar from the response's Set-Cookie headers, and persist it. Throws
  * RMAuthError if the session is dead so callers can report "re-auth needed".
  */
-async function rmGraphQL<T = unknown>(body: GraphQLBody): Promise<T> {
+async function rmExecute<T = unknown>(opName: string, payload: Record<string, unknown>): Promise<T> {
   const jar = loadSession();
   if (!jar) throw new RMAuthError("No Rocket Money session. Paste a fresh cookie at /auth.");
 
@@ -67,16 +67,12 @@ async function rmGraphQL<T = unknown>(body: GraphQLBody): Promise<T> {
       "x-truebill-web-client-version": WEB_CLIENT_VERSION,
       cookie: serializeJar(jar),
     },
-    body: JSON.stringify({
-      operationName: body.operationName,
-      variables: body.variables ?? {},
-      extensions: { persistedQuery: { version: 1, sha256Hash: PERSISTED[body.operationName] } },
-    }),
+    body: JSON.stringify(payload),
     redirect: "manual",
   });
 
   if (res.status === 401 || res.status === 403 || res.status === 302) {
-    markSessionDead(`HTTP ${res.status} on ${body.operationName}`);
+    markSessionDead(`HTTP ${res.status} on ${opName}`);
     throw new RMAuthError(`Rocket Money auth failed (HTTP ${res.status}). Re-auth at /auth.`);
   }
 
@@ -88,7 +84,7 @@ async function rmGraphQL<T = unknown>(body: GraphQLBody): Promise<T> {
   try {
     json = JSON.parse(text);
   } catch {
-    throw new Error(`RM ${body.operationName}: non-JSON response (HTTP ${res.status})`);
+    throw new Error(`RM ${opName}: non-JSON response (HTTP ${res.status})`);
   }
 
   if (json.errors?.length) {
@@ -103,10 +99,10 @@ async function rmGraphQL<T = unknown>(body: GraphQLBody): Promise<T> {
     }
     if (json.errors.some((e) => /PersistedQueryNotFound/i.test(e.message))) {
       throw new Error(
-        `RM ${body.operationName}: PersistedQueryNotFound - Rocket Money rotated this query hash; re-capture it from a fresh HAR and update PERSISTED in client.ts.`,
+        `RM ${opName}: PersistedQueryNotFound - Rocket Money rotated this query hash; re-capture it from a fresh HAR and update PERSISTED in client.ts.`,
       );
     }
-    throw new Error(`RM ${body.operationName}: ${json.errors.map((e) => e.message).join("; ")}`);
+    throw new Error(`RM ${opName}: ${json.errors.map((e) => e.message).join("; ")}`);
   }
 
   // Healthy authenticated response - commit the rotated cookies.
@@ -116,6 +112,27 @@ async function rmGraphQL<T = unknown>(body: GraphQLBody): Promise<T> {
   saveSession(jar);
 
   return json.data as T;
+}
+
+/** Persisted-query READ (hash captured from a HAR; may rotate server-side). */
+async function rmGraphQL<T = unknown>(body: GraphQLBody): Promise<T> {
+  return rmExecute<T>(body.operationName, {
+    operationName: body.operationName,
+    variables: body.variables ?? {},
+    extensions: { persistedQuery: { version: 1, sha256Hash: PERSISTED[body.operationName] } },
+  });
+}
+
+/**
+ * Full-text WRITE mutation. Sends the whole query string rather than a persisted
+ * hash on purpose, so RM rotating a read hash can never break the write path.
+ */
+async function rmMutation<T = unknown>(
+  operationName: string,
+  query: string,
+  variables: Record<string, unknown>,
+): Promise<T> {
+  return rmExecute<T>(operationName, { operationName, query, variables });
 }
 
 // ── Generic helpers ────────────────────────────────────────────────
@@ -333,6 +350,38 @@ export async function searchTransactions(
 
   const seen = new Set<string>();
   return all.filter((t) => (seen.has(t.nodeId) ? false : (seen.add(t.nodeId), true)));
+}
+
+// ── Write operations (Amazon enrichment) ──────────────────────────
+// These MUTATE Rocket Money. Everything above is read-only; keep it that way.
+
+/** base64(`TransactionCategory:<id>`) for a numeric category id. */
+export function categoryNodeId(numericId: string | number): string {
+  return toNodeId("TransactionCategory", numericId);
+}
+
+/** WRITE: set a transaction's free-text note (used to store the Amazon item name). */
+export async function setTransactionNote(nodeId: string, note: string): Promise<void> {
+  await rmMutation(
+    "SetTransactionNote",
+    "mutation SetTransactionNote($input: SetTransactionNoteInput!) {\n  setTransactionNote(input: $input) {\n    __typename\n    transaction {\n      __typename\n      id\n      note\n    }\n  }\n}",
+    { input: { transactionNodeId: nodeId, note } },
+  );
+}
+
+/** WRITE: set a transaction's spending category. */
+export async function setTransactionCategory(nodeId: string, catNodeId: string): Promise<void> {
+  await rmMutation(
+    "SetTransactionCategory",
+    "mutation SetTransactionCategory($input: SetTransactionCategoryInput!) {\n  setTransactionCategory(input: $input) {\n    __typename\n    updatedTransactions {\n      id\n      __typename\n    }\n  }\n}",
+    {
+      input: {
+        transactionNodeId: nodeId,
+        transactionCategoryNodeId: catNodeId,
+        categorizeAllRelatedTransactions: false,
+      },
+    },
+  );
 }
 
 export { findByType, collectByType };

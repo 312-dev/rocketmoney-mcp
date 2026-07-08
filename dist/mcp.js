@@ -4,6 +4,8 @@ import { RMAuthError } from "./rm/client.js";
 import * as rm from "./rm/client.js";
 import * as fmt from "./rm/format.js";
 import { sessionStatus } from "./rm/session.js";
+import { getSchedulerConfig, runNow, setSchedulerConfig } from "./amazon/scheduler.js";
+import { syncAmazonSince } from "./amazon/sync.js";
 const AUTH_HINT = "Rocket Money session is not active. Open the auth page (rocketmoney-auth.graysons.network) and paste a fresh `tb.auth0.sid` cookie from a logged-in app.rocketmoney.com browser tab.";
 /** Wrap a tool body so RMAuthError becomes a clean, actionable MCP error. */
 function tool(fn) {
@@ -22,7 +24,7 @@ const READ = { readOnlyHint: true, openWorldHint: true };
 /** Build a fresh McpServer with all read-only Rocket Money tools registered. */
 export function buildServer() {
     const server = new McpServer({ name: "rocketmoney", version: "1.0.0" }, {
-        instructions: "Read-only access to the user's Rocket Money finances: accounts and balances, transactions, spending by category, budgets, net worth, and subscriptions. All amounts are in USD. This server never modifies anything in Rocket Money. If a tool reports the session is inactive, the user must re-authenticate at the auth page.",
+        instructions: "Access to the user's Rocket Money finances: accounts and balances, transactions, spending by category, budgets, net worth, and subscriptions (all read-only, USD). The ONLY tools that write to Rocket Money are the amazon_sync_* tools: they enrich Amazon transactions by setting each one's note to the ordered item name and its spending category, matched from Amazon order-confirmation emails. amazon_sync_preview is a safe dry run; amazon_sync_apply writes; amazon_sync_enable/disable control an autonomous background sync. If a tool reports the session is inactive, the user must re-authenticate at the auth page.",
     });
     server.registerTool("session_status", {
         title: "Session status",
@@ -132,5 +134,63 @@ export function buildServer() {
             })),
         };
     }));
+    // ── Amazon enrichment (the only WRITE tools) ─────────────────────
+    const WRITE = { readOnlyHint: false, openWorldHint: true };
+    server.registerTool("amazon_sync_preview", {
+        title: "Preview Amazon sync",
+        description: "DRY RUN: match recent Amazon transactions to Amazon order-confirmation emails and show what note (item name) + category WOULD be written. Writes nothing. Use this before amazon_sync_apply.",
+        inputSchema: {
+            since_days: z
+                .number()
+                .int()
+                .min(1)
+                .max(400)
+                .optional()
+                .describe("Look back this many days (default: the scheduler's lookback, 10)"),
+        },
+        annotations: READ,
+    }, tool(async ({ since_days }) => runNow(true, since_days)));
+    server.registerTool("amazon_sync_apply", {
+        title: "Apply Amazon sync",
+        description: "WRITES to Rocket Money: enrich recent Amazon transactions by setting each one's note to the ordered item name and its spending category. Idempotent (skips rows already synced unchanged). Run amazon_sync_preview first to see the changes.",
+        inputSchema: {
+            since_days: z.number().int().min(1).max(400).optional().describe("Look back this many days (default 10)"),
+        },
+        annotations: WRITE,
+    }, tool(async ({ since_days }) => runNow(false, since_days)));
+    server.registerTool("amazon_sync_backfill", {
+        title: "Backfill Amazon sync",
+        description: "WRITES to Rocket Money: one historical enrichment pass over every Amazon transaction on/after a date. Searches Amazon confirmation emails across Inbox, Archive, Trash, and Junk. Idempotent.",
+        inputSchema: {
+            since: z.string().describe("Enrich transactions on/after this date (YYYY-MM-DD)"),
+            dry_run: z.boolean().optional().describe("Preview only, write nothing (default false)"),
+        },
+        annotations: WRITE,
+    }, tool(async ({ since, dry_run }) => syncAmazonSince(since, dry_run ?? false)));
+    server.registerTool("amazon_sync_status", {
+        title: "Amazon sync status",
+        description: "Show the autonomous Amazon-sync scheduler state (enabled, interval, lookback, last run + last run's summary) and whether the Rocket Money session is live.",
+        inputSchema: {},
+        annotations: READ,
+    }, tool(async () => ({ scheduler: getSchedulerConfig(), session: sessionStatus() })));
+    server.registerTool("amazon_sync_enable", {
+        title: "Enable autonomous Amazon sync",
+        description: "Turn ON the background Amazon-sync scheduler. It then WRITES enrichment to Rocket Money every `interval_hours` (default 6) over the last `lookback_days` (default 10), whenever the session is live. Disabled by default.",
+        inputSchema: {
+            interval_hours: z.number().int().min(1).max(168).optional().describe("Hours between runs (default 6)"),
+            lookback_days: z.number().int().min(1).max(60).optional().describe("Days looked back each run (default 10)"),
+        },
+        annotations: WRITE,
+    }, tool(async ({ interval_hours, lookback_days }) => setSchedulerConfig({
+        enabled: true,
+        ...(interval_hours !== undefined ? { intervalHours: interval_hours } : {}),
+        ...(lookback_days !== undefined ? { lookbackDays: lookback_days } : {}),
+    })));
+    server.registerTool("amazon_sync_disable", {
+        title: "Disable autonomous Amazon sync",
+        description: "Turn OFF the background Amazon-sync scheduler. On-demand amazon_sync_apply/preview still work.",
+        inputSchema: {},
+        annotations: WRITE,
+    }, tool(async () => setSchedulerConfig({ enabled: false })));
     return server;
 }

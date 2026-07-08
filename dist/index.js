@@ -4,6 +4,7 @@ import { buildServer } from "./mcp.js";
 import { renderAuthPage, submitAuth, ingestAuth, authStatus } from "./auth-page.js";
 import { refreshAuthToken } from "./rm/client.js";
 import { sessionStatus } from "./rm/session.js";
+import { startAmazonScheduler } from "./amazon/scheduler.js";
 const PORT = Number(process.env.PORT ?? 8080);
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -69,6 +70,10 @@ async function keepalive() {
     }
 }
 setInterval(keepalive, KEEPALIVE_MS).unref();
+// Autonomous Amazon->RM enrichment. Disabled by default; toggled by the
+// amazon_sync_enable/disable MCP tools. Only ever runs when the flag is on AND
+// the session is live (the browser extension keeps it fresh).
+startAmazonScheduler();
 app.listen(PORT, () => {
     console.log(`[rocketmoney-mcp] listening on :${PORT}  (POST /mcp, GET /auth)`);
 });
