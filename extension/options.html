@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Rocket Money MCP Sync - Options</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 -apple-system, system-ui, sans-serif; max-width: 560px; margin: 5vh auto; padding: 0 20px; }
+  h1 { font-size: 18px; }
+  label { display: block; margin: 14px 0 4px; font-weight: 600; }
+  input { width: 100%; box-sizing: border-box; padding: 9px; border-radius: 8px;
+          border: 1px solid rgba(128,128,128,.4); font: 13px monospace; }
+  .row { display: flex; gap: 10px; margin-top: 18px; }
+  button { padding: 9px 16px; border: 0; border-radius: 8px; background: #6b4dff; color: #fff; cursor: pointer; font-size: 14px; }
+  button.secondary { background: rgba(128,128,128,.25); color: inherit; }
+  small { opacity: .75; } code { background: rgba(128,128,128,.15); padding: .05em .3em; border-radius: 4px; }
+  #msg { margin-top: 14px; min-height: 1.2em; }
+  .ok { color: #1a7f37; } .bad { color: #cf222e; }
+</style></head><body>
+<h1>Rocket Money MCP Sync</h1>
+<p><small>The extension pushes your logged-in Rocket Money session cookie to your MCP
+server. It authenticates to the server with a Cloudflare Access <b>service token</b>.</small></p>
+
+<label for="ingestUrl">Ingest URL</label>
+<input id="ingestUrl" placeholder="https://rocketmoney-auth.graysons.network/auth/ingest">
+
+<label for="clientId">CF-Access-Client-Id</label>
+<input id="clientId" placeholder="xxxx…access">
+
+<label for="clientSecret">CF-Access-Client-Secret</label>
+<input id="clientSecret" type="password" placeholder="64-char secret">
+
+<div class="row">
+  <button id="save">Save</button>
+  <button id="test" class="secondary">Save &amp; sync now</button>
+</div>
+<div id="msg"></div>
+<script src="options.js"></script>
+</body></html>

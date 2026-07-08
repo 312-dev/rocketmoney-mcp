@@ -46,13 +46,40 @@ is never sent anywhere but Rocket Money's API.</p>
 <ol>
   <li>Open <a href="https://app.rocketmoney.com" target="_blank" rel="noopener">app.rocketmoney.com</a> and make sure you're logged in.</li>
   <li>Open DevTools (&#8984;&#8997;I) &rarr; <b>Application</b> &rarr; <b>Cookies</b> &rarr; <code>https://app.rocketmoney.com</code>.</li>
-  <li>Copy the value of <code>tb.auth0.sid</code> (or the whole <code>Cookie:</code> request header from any GraphQL request - more robust).</li>
+  <li>Copy the value of <code>tb.auth0.sid</code> (just the value is fine - no <code>name=</code> needed). Pasting the whole <code>Cookie:</code> request header from a GraphQL request also works and is a bit more robust.</li>
   <li>Paste it below and save.</li>
 </ol>
+<p style="font-size:13px;opacity:.8">Tip: install the Rocket Money MCP browser extension and this becomes automatic -
+it keeps the session fresh while you're logged in, no pasting.</p>
 <form method="post" action="/auth/submit">
-  <textarea name="cookie" placeholder="tb.auth0.sid=...   (or the full Cookie header)" autofocus></textarea>
+  <textarea name="cookie" placeholder="paste the tb.auth0.sid value (or the full Cookie header)" autofocus></textarea>
   <button type="submit">Save session</button>
 </form>`));
+}
+// ── JSON API for the browser extension ─────────────────────────────
+// Same trust model as the paste page: this hostname is gated at the Cloudflare
+// edge (Email OTP for a human, or the extension's Access service token), so a
+// request that reaches here is already the account owner. No app-layer secret.
+/** GET /auth/status -> current session state as JSON (drives the popup). */
+export function authStatus(_req, res) {
+    res.status(200).json(sessionStatus());
+}
+/**
+ * POST /auth/ingest {cookie} -> seed/refresh the session from the extension.
+ * `cookie` may be a full Cookie header, a tb.auth0.sid pair, or the bare value.
+ */
+export function ingestAuth(req, res) {
+    const raw = String(req.body?.cookie ?? "");
+    if (!raw.trim()) {
+        res.status(400).json({ ok: false, error: "missing cookie" });
+        return;
+    }
+    const err = seedSession(raw);
+    if (err) {
+        res.status(400).json({ ok: false, error: err });
+        return;
+    }
+    res.status(200).json({ ok: true, ...sessionStatus() });
 }
 export function submitAuth(req, res) {
     const raw = String(req.body?.cookie ?? "");

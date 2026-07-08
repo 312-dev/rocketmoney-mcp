@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Rocket Money MCP Sync</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 13px/1.45 -apple-system, system-ui, sans-serif; width: 280px; margin: 0; padding: 14px 16px; }
+  h1 { font-size: 14px; margin: 0 0 10px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: baseline; }
+  .live { background: #1a7f37; } .bad { background: #cf222e; } .idle { background: #8a8a8a; }
+  .line { margin: 6px 0; }
+  .k { opacity: .7; }
+  .row { display: flex; gap: 8px; margin-top: 12px; }
+  button { flex: 1; padding: 8px; border: 0; border-radius: 8px; background: #6b4dff; color: #fff; cursor: pointer; font-size: 13px; }
+  button.secondary { background: rgba(128,128,128,.25); color: inherit; }
+  #msg { margin-top: 8px; min-height: 1.1em; opacity: .8; }
+</style></head><body>
+<h1>Rocket Money MCP Sync</h1>
+<div class="line"><span id="serverDot" class="dot idle"></span><span class="k">Server session:</span> <b id="server">-</b></div>
+<div class="line"><span id="loginDot" class="dot idle"></span><span class="k">Browser login:</span> <b id="login">-</b></div>
+<div class="line"><span class="k">Last sync:</span> <span id="last">never</span></div>
+<div class="row">
+  <button id="sync">Sync now</button>
+  <button id="opts" class="secondary">Options</button>
+</div>
+<div id="msg"></div>
+<script src="popup.js"></script>
+</body></html>

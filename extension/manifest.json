@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Rocket Money MCP Sync",
+  "version": "1.0.0",
+  "description": "Keeps your Rocket Money MCP server session fresh from your logged-in browser session. No pasting.",
+  "permissions": ["cookies", "storage", "alarms"],
+  "host_permissions": [
+    "https://*.rocketmoney.com/*",
+    "https://rocketmoney-auth.graysons.network/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Rocket Money MCP Sync",
+    "default_icon": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
+  },
+  "options_page": "options.html",
+  "icons": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
+}

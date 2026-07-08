@@ -83,14 +83,30 @@ export function applySetCookies(jar: CookieJar, setCookies: string[]): void {
 }
 
 /**
- * Seed a brand-new session from a cookie the user just pasted into /auth. A
- * freshly-exported cookie ALWAYS replaces stale persisted state. Returns an
- * error message if the pasted value is unusable, or null on success.
+ * Normalize whatever the user (or the browser extension) hands us into a Cookie
+ * header string. Accepts three shapes, most-to-least structured:
+ *   1. a full Cookie header:  `tb.auth0.sid=abc; AWSALB=xyz`
+ *   2. just the pair:         `tb.auth0.sid=abc`
+ *   3. JUST THE VALUE:        `abc`   <- no k=v required
+ * If the input doesn't already carry a tb.auth0.sid pair, we treat the entire
+ * trimmed string as the bare tb.auth0.sid value and wrap it.
+ */
+export function normalizeCookieInput(raw: string): string {
+  const s = raw.trim();
+  if (!s) return s;
+  return /(^|;\s*)tb\.auth0\.sid=/.test(s) ? s : `tb.auth0.sid=${s}`;
+}
+
+/**
+ * Seed a brand-new session from a cookie the user pasted into /auth or the
+ * extension pushed to /auth/ingest. A freshly-exported cookie ALWAYS replaces
+ * stale persisted state. Returns an error message if the value is unusable, or
+ * null on success.
  */
 export function seedSession(rawCookie: string): string | null {
-  const jar = parseCookieHeader(rawCookie.trim());
-  if (!jar.has("tb.auth0.sid")) {
-    return "That cookie has no `tb.auth0.sid` value. Copy the whole Cookie header (or at least the tb.auth0.sid pair) from a logged-in app.rocketmoney.com request.";
+  const jar = parseCookieHeader(normalizeCookieInput(rawCookie));
+  if (!jar.get("tb.auth0.sid")) {
+    return "No session value provided. Paste the tb.auth0.sid value (just the value is fine), or the whole Cookie header, from a logged-in app.rocketmoney.com request.";
   }
   writeRow({
     cookie: serializeJar(jar),

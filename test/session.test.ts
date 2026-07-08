@@ -38,11 +38,18 @@ test("applySetCookies rotates values and ignores deletions", () => {
   assert.equal(jar.get("AWSALBCORS"), "fresh"); // new cookie added
 });
 
-test("seedSession rejects a cookie without tb.auth0.sid", () => {
-  const err = seedSession("AWSALB=xyz; foo=bar");
-  assert.ok(err && /tb\.auth0\.sid/.test(err));
+test("seedSession rejects only empty / whitespace input", () => {
+  const err = seedSession("   ");
+  assert.ok(err);
   assert.equal(loadSession(), null);
   assert.equal(sessionStatus().status, "missing");
+});
+
+test("seedSession accepts a bare tb.auth0.sid value (no k=v required)", () => {
+  const err = seedSession("  rawSidValue123  ");
+  assert.equal(err, null);
+  assert.equal(loadSession()?.get("tb.auth0.sid"), "rawSidValue123");
+  assert.equal(sessionStatus().status, "live");
 });
 
 test("seedSession accepts a valid cookie and marks the session live", () => {

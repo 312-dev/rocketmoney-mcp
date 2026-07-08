@@ -1,7 +1,7 @@
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer } from "./mcp.js";
-import { renderAuthPage, submitAuth } from "./auth-page.js";
+import { renderAuthPage, submitAuth, ingestAuth, authStatus } from "./auth-page.js";
 import { refreshAuthToken } from "./rm/client.js";
 import { sessionStatus } from "./rm/session.js";
 
@@ -18,6 +18,20 @@ app.get("/healthz", (_req, res) => res.status(200).send("ok"));
 app.get("/", renderAuthPage);
 app.get("/auth", renderAuthPage);
 app.post("/auth/submit", submitAuth);
+
+// ── JSON API for the browser extension ─────────────────────────────
+// CORS is permissive: the extension service worker with host_permissions does
+// not trigger a preflight, but browser-context callers might. Auth is at the
+// Cloudflare Access edge (service token / OTP), not here.
+app.use(["/auth/ingest", "/auth/status"], (req, res, next) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "content-type, cf-access-client-id, cf-access-client-secret");
+  if (req.method === "OPTIONS") return void res.status(204).end();
+  next();
+});
+app.get("/auth/status", authStatus);
+app.post("/auth/ingest", ingestAuth);
 
 // ── MCP endpoint (served on rocketmoney.graysons.network via Worker) ─
 // Stateless streamable HTTP: a fresh server+transport per request, torn down on
