@@ -1,9 +1,10 @@
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer } from "./mcp.js";
-import { renderAuthPage, submitAuth, ingestAuth, authStatus } from "./auth-page.js";
+import { renderAuthPage, submitAuth, ingestAuth, authStatus, triggerLogin, postOtp } from "./auth-page.js";
 import { refreshAuthToken } from "./rm/client.js";
 import { sessionStatus } from "./rm/session.js";
+import { attemptLogin, autoLoginConfigured } from "./rm/login.js";
 import { startAmazonScheduler } from "./amazon/scheduler.js";
 const PORT = Number(process.env.PORT ?? 8080);
 const app = express();
@@ -15,6 +16,8 @@ app.get("/healthz", (_req, res) => res.status(200).send("ok"));
 app.get("/", renderAuthPage);
 app.get("/auth", renderAuthPage);
 app.post("/auth/submit", submitAuth);
+app.post("/auth/login", triggerLogin); // trigger headless auto-login
+app.post("/auth/otp", postOtp); // feed an SMS code to a parked login run
 // ── JSON API for the browser extension ─────────────────────────────
 // CORS is permissive: the extension service worker with host_permissions does
 // not trigger a preflight, but browser-context callers might. Auth is at the
@@ -59,14 +62,25 @@ app.delete("/mcp", methodNotAllowed);
 // absolute cap kills it. Harmless when there's no session (skips quietly).
 const KEEPALIVE_MS = Number(process.env.ROCKETMONEY_KEEPALIVE_MS ?? 2 * 60 * 60 * 1000); // 2h
 async function keepalive() {
-    if (sessionStatus().status !== "live")
+    // Dead/missing session: fall back to a headless re-login (rate-limited + backed
+    // off inside attemptLogin, so this can safely run every keepalive tick). A cold
+    // login may park on the SMS challenge - the user finishes it from /auth.
+    if (sessionStatus().status !== "live") {
+        if (autoLoginConfigured()) {
+            const r = await attemptLogin("keepalive: session not live");
+            if (!r.ok && !r.error?.startsWith("rate-limited"))
+                console.warn("[keepalive] auto-login:", r.error);
+        }
         return;
+    }
     try {
         await refreshAuthToken();
         console.log("[keepalive] ok");
     }
     catch (err) {
         console.warn("[keepalive] failed:", String(err));
+        // A refresh that fails on auth means the session just died; let auto-login
+        // (rate-limited) take over on the next tick rather than spinning here.
     }
 }
 setInterval(keepalive, KEEPALIVE_MS).unref();

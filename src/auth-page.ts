@@ -1,5 +1,8 @@
 import type { Request, Response } from "express";
 import { seedSession, sessionStatus } from "./rm/session.js";
+import { attemptLogin, submitOtp, otpPending, loginState } from "./rm/login.js";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // The paste-a-cookie page. Served on rocketmoney-auth.graysons.network, which
 // routes tunnel -> here directly (NOT through the OAuth Worker), and is gated at
@@ -42,11 +45,42 @@ function statusBlock(): string {
   return `<div class="status">Current session: ${label}</div>`;
 }
 
+/**
+ * Auto-login controls. Only rendered when ROCKETMONEY_AUTO_LOGIN is configured.
+ * Shows a "Log in now" button, and - while a run is parked on the SMS step - an
+ * OTP box to feed the texted code back to the waiting headless browser.
+ */
+function autoLoginBlock(): string {
+  const st = loginState();
+  if (!st.configured) return "";
+  if (st.otpPending) {
+    return `<div class="status">
+  <b>Enter the SMS code</b> - Rocket Money texted a verification code. Type it here to
+  finish the automated login.
+  <form method="post" action="/auth/otp" style="margin-top:10px">
+    <input name="code" inputmode="numeric" autocomplete="one-time-code" autofocus
+           style="font:15px monospace;padding:8px;border-radius:8px;border:1px solid rgba(128,128,128,.4)">
+    <button type="submit">Submit code</button>
+  </form>
+</div>`;
+  }
+  const busy = st.inFlight ? " (in progress...)" : "";
+  const cool = st.cooldownMs > 0 ? ` - next auto-attempt in ${Math.ceil(st.cooldownMs / 60000)}m` : "";
+  return `<div class="status">
+  <b>Automated login</b> is enabled${busy}. It drives a headless browser to refresh the
+  session when it dies${cool}.
+  <form method="post" action="/auth/login" style="margin-top:10px">
+    <button type="submit"${st.inFlight ? " disabled" : ""}>Log in now</button>
+  </form>
+</div>`;
+}
+
 export function renderAuthPage(_req: Request, res: Response): void {
   res.status(200).type("html").send(
     page(`
 <h1>Rocket Money MCP session</h1>
 ${statusBlock()}
+${autoLoginBlock()}
 <p>Rocket Money has no third-party login, so this connector reuses your own web
 session. Grab the cookie and paste it here - it stays on your gateway machine and
 is never sent anywhere but Rocket Money's API.</p>
@@ -91,6 +125,39 @@ export function ingestAuth(req: Request, res: Response): void {
     return;
   }
   res.status(200).json({ ok: true, ...sessionStatus() });
+}
+
+/**
+ * POST /auth/login -> kick off a headless auto-login (bypasses the cooldown).
+ * We don't await the whole run (it may block on an SMS code); we give it a beat
+ * to reach a decision point, then re-render /auth (which shows the OTP box if the
+ * run parked on the SMS challenge).
+ */
+export async function triggerLogin(_req: Request, res: Response): Promise<void> {
+  void attemptLogin("manual /auth trigger", true);
+  await Promise.race([sleep(3500), (async () => {
+    // resolve early once the run either finishes or parks for OTP
+    while (!otpPending() && loginState().inFlight) await sleep(200);
+  })()]);
+  res.redirect(303, "/auth");
+}
+
+/** POST /auth/otp {code} -> feed the SMS code to the parked login run. */
+export function postOtp(req: Request, res: Response): void {
+  const code = String((req.body as { code?: string })?.code ?? "").trim();
+  if (!code) {
+    res.status(400).type("html").send(page(`<h1 class="bad">No code provided</h1><p><a href="/auth">Back</a></p>`));
+    return;
+  }
+  const accepted = submitOtp(code);
+  if (!accepted) {
+    res.status(409).type("html").send(
+      page(`<h1 class="bad">No login is waiting for a code</h1><p>The run may have timed out. <a href="/auth">Back</a></p>`),
+    );
+    return;
+  }
+  // Give the resumed run a moment to complete before showing status.
+  res.redirect(303, "/auth");
 }
 
 export function submitAuth(req: Request, res: Response): void {

@@ -22,6 +22,7 @@
     "@modelcontextprotocol/sdk": "^1.27.0",
     "express": "^4.21.2",
     "jmap-jam": "^0.13.2",
+    "puppeteer-core": "^25.3.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
