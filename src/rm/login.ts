@@ -278,10 +278,18 @@ async function doLogin(reason: string): Promise<LoginResult> {
     // domcontentloaded, NOT networkidle2: the app fires a constant stream of
     // analytics/tracker requests (__ps_*, Segment, Datadog, Stripe, Intercom), so
     // over the proxied residential link the network never goes quiet and
-    // networkidle2 burns its full timeout and throws. The form is waited for by
-    // firstVisible() below anyway.
-    await page.goto(APP_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await sleep(2500);
+    // networkidle2 burns its full timeout and throws.
+    //
+    // And the goto is non-fatal: over the home SOCKS link the app->Auth0 redirect
+    // chain intermittently exceeds the nav budget, but the page usually loaded
+    // fine anyway. Catching it lets firstVisible() below poll for the form rather
+    // than the whole run dying on a slow (but successful) navigation.
+    try {
+      await page.goto(APP_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
+    } catch (e) {
+      console.warn(`[auto-login] initial nav slow (${(e as Error).message}); polling for the form anyway`);
+    }
+    await sleep(3000);
 
     // Path 1: trusted profile silently renewed -> already have a session.
     {
