@@ -1,7 +1,18 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import puppeteer from "puppeteer-core";
+import { addExtra } from "puppeteer-extra";
+import Stealth from "puppeteer-extra-plugin-stealth";
+import vanilla from "rebrowser-puppeteer-core";
 import { seedSession, sessionStatus } from "./session.js";
+// Auth0/Cloudflare bot-detection flags plain headless Chromium (the CDP
+// Runtime.enable leak + navigator.webdriver + headless signals). rebrowser-
+// puppeteer-core patches the CDP leak; the stealth plugin patches the fingerprint;
+// and we launch HEADFUL (headless is itself the tell - verified: headless is
+// blocked, headful reaches the SMS screen). On Fly the process runs under Xvfb so
+// "headful" works without a real display.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const puppeteer = addExtra(vanilla);
+puppeteer.use(Stealth());
 // ── Headless auto-login (Fly-side) ─────────────────────────────────
 //
 // Rocket Money's web session is a short-lived rolling cookie with no offline
@@ -160,14 +171,14 @@ async function doLogin(reason) {
         if (proxy) {
             args.push(`--proxy-server=${proxy}`, "--proxy-bypass-list=<-loopback>");
         }
-        browser = await puppeteer.launch({
+        browser = (await puppeteer.launch({
             executablePath: CHROMIUM(),
-            headless: true,
+            headless: false, // headful (under Xvfb on Fly): headless is what gets bot-flagged
             userDataDir: profile,
             args,
             defaultViewport: { width: 1280, height: 900 },
             protocolTimeout: 120000,
-        });
+        }));
         const page = (await browser.pages())[0] ?? (await browser.newPage());
         await page.setUserAgent(USER_AGENT);
         await page.goto(APP_URL, { waitUntil: "networkidle2", timeout: 60000 });

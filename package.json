@@ -22,7 +22,9 @@
     "@modelcontextprotocol/sdk": "^1.27.0",
     "express": "^4.21.2",
     "jmap-jam": "^0.13.2",
-    "puppeteer-core": "^25.3.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "rebrowser-puppeteer-core": "^24.8.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
