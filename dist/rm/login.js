@@ -176,22 +176,33 @@ async function firstVisible(page, selectors, timeout = 12000) {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
         for (const sel of selectors) {
-            const el = await page.$(sel);
-            if (el && (await el.boundingBox()))
-                return el;
+            try {
+                const el = await page.$(sel);
+                if (el && (await el.boundingBox()))
+                    return el;
+            }
+            catch {
+                // "Execution context was destroyed" - page is mid-navigation. Skip this
+                // tick; the element (if any) will be there once navigation settles.
+            }
         }
         await sleep(250);
     }
     return null;
 }
-/** Read the app-domain cookies and return {sid, header}. */
+/** Read the app-domain cookies and return {sid, header}. Tolerant of a navigating page. */
 async function readSession(page) {
-    // page.cookies(url) is deprecated in favor of the CDP-backed browser context,
-    // but remains the simplest per-URL read and is stable for our use.
-    const cookies = await page.cookies(APP_URL);
-    const sid = cookies.find((c) => c.name === "tb.auth0.sid")?.value ?? null;
-    const header = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-    return { sid, header };
+    try {
+        // page.cookies(url) is deprecated in favor of the CDP-backed browser context,
+        // but remains the simplest per-URL read and is stable for our use.
+        const cookies = await page.cookies(APP_URL);
+        const sid = cookies.find((c) => c.name === "tb.auth0.sid")?.value ?? null;
+        const header = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+        return { sid, header };
+    }
+    catch {
+        return { sid: null, header: "" }; // navigating; try again next tick
+    }
 }
 // ── The login run ──────────────────────────────────────────────────
 async function doLogin(reason) {
@@ -306,46 +317,55 @@ async function doLogin(reason) {
         let inboundCode = null;
         while (Date.now() < overall) {
             await sleep(1500);
-            // Always check for a session FIRST, on every tick, whatever else is pending.
-            const s = await readSession(page);
-            if (s.sid) {
-                seedSession(s.header);
-                console.log(`[auto-login] success${otpArmed ? " (MFA satisfied)" : ""}`);
-                return { ok: true };
-            }
-            // Arm the OTP waiter once, without blocking this loop.
-            if (/mfa-sms-challenge|mfa/.test(page.url()) && !otpArmed) {
-                otpArmed = true;
-                console.log("[auto-login] SMS challenge - waiting for code via /auth");
-                void waitForOtp(4 * 60 * 1000).then((c) => {
-                    inboundCode = c;
-                });
-            }
-            // A code arrived via /auth/otp -> type it once.
-            if (inboundCode && !otpSubmitted) {
-                const code = inboundCode;
-                inboundCode = null;
-                otpSubmitted = true;
-                const codeEl = await firstVisible(page, [
-                    "input[name='code']",
-                    "input#code",
-                    "input[autocomplete='one-time-code']",
-                    "input[inputmode='numeric']",
-                    "input[type='text']",
-                ]);
-                if (codeEl) {
-                    await codeEl.click({ count: 3 });
-                    await codeEl.type(code, { delay: 40 });
-                    const verify = await firstVisible(page, ["button[type='submit']", "button[name='action']"]);
-                    if (verify)
-                        await verify.click();
-                    console.log("[auto-login] SMS code submitted");
+            // The whole body is best-effort: the page redirects underneath us (email->
+            // password, submit->MFA, MFA->callback), and any call landing mid-navigation
+            // throws "Execution context was destroyed". Since this is a poll loop, we
+            // just skip the offending tick and try again once navigation settles.
+            try {
+                // Always check for a session FIRST, on every tick, whatever else is pending.
+                const s = await readSession(page);
+                if (s.sid) {
+                    seedSession(s.header);
+                    console.log(`[auto-login] success${otpArmed ? " (MFA satisfied)" : ""}`);
+                    return { ok: true };
                 }
-                else {
-                    // Page already moved on (e.g. MFA completed another way) - keep polling
-                    // for the session rather than failing outright.
-                    console.warn("[auto-login] code supplied but no code field; still watching for a session");
+                // Arm the OTP waiter once, without blocking this loop.
+                if (/mfa-sms-challenge|mfa/.test(page.url()) && !otpArmed) {
+                    otpArmed = true;
+                    console.log("[auto-login] SMS challenge - waiting for code via /auth or SMS webhook");
+                    void waitForOtp(4 * 60 * 1000).then((c) => {
+                        inboundCode = c;
+                    });
                 }
+                // A code arrived (via /auth/otp or the SMS webhook) -> type it once.
+                if (inboundCode && !otpSubmitted) {
+                    const code = inboundCode;
+                    inboundCode = null;
+                    const codeEl = await firstVisible(page, [
+                        "input[name='code']",
+                        "input#code",
+                        "input[autocomplete='one-time-code']",
+                        "input[inputmode='numeric']",
+                        "input[type='text']",
+                    ]);
+                    if (codeEl) {
+                        await codeEl.click({ count: 3 });
+                        await codeEl.type(code, { delay: 40 });
+                        const verify = await firstVisible(page, ["button[type='submit']", "button[name='action']"]);
+                        if (verify)
+                            await verify.click();
+                        otpSubmitted = true;
+                        console.log("[auto-login] SMS code submitted");
+                    }
+                    else {
+                        // Page already moved on (e.g. MFA completed another way) - keep polling
+                        // for the session rather than failing outright.
+                        console.warn("[auto-login] code supplied but no code field; still watching for a session");
+                    }
+                }
+            }
+            catch (e) {
+                console.warn(`[auto-login] transient (navigating): ${e.message}`);
             }
         }
         await snapshot(page, otpArmed ? "mfa-timeout" : "timeout");
