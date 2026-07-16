@@ -157,15 +157,43 @@ export function postOtp(req: Request, res: Response): void {
     res.status(400).type("html").send(page(`<h1 class="bad">No code provided</h1><p><a href="/auth">Back</a></p>`));
     return;
   }
-  const accepted = submitOtp(code);
-  if (!accepted) {
-    res.status(409).type("html").send(
-      page(`<h1 class="bad">No login is waiting for a code</h1><p>The run may have timed out. <a href="/auth">Back</a></p>`),
-    );
-    return;
-  }
+  submitOtp(code); // buffered if no run is parked yet; consumed when one arms
   // Give the resumed run a moment to complete before showing status.
   res.redirect(303, "/auth");
+}
+
+/**
+ * POST /auth/sms -> receive a forwarded SMS from the phone and hand its code to a
+ * (possibly not-yet-parked) login run. Guarded by a shared secret in the
+ * `X-SMS-Secret` header or `?secret=` query - the phone's SMS-forwarder app is
+ * configured to send it. Accepts the SMS text from common field names or the raw
+ * body, extracts the 6-digit code, and feeds it to submitOtp (which buffers it if
+ * the run hasn't parked yet). Returns 200 even when nothing is parked, so a stray
+ * forward is a no-op rather than an error the forwarder retries forever.
+ */
+export function smsWebhook(req: Request, res: Response): void {
+  const want = process.env.ROCKETMONEY_SMS_WEBHOOK_SECRET ?? "";
+  const got = String(req.header("x-sms-secret") ?? (req.query.secret as string) ?? "");
+  if (!want || got !== want) {
+    res.status(403).json({ ok: false, error: "forbidden" });
+    return;
+  }
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const text =
+    typeof req.body === "string"
+      ? req.body
+      : String(b.text ?? b.message ?? b.body ?? b.msg ?? b.content ?? "");
+  // RM's code is 6 digits. Prefer digits that sit next to a code-ish word; else
+  // take the first standalone 6-digit run.
+  const near = text.match(/(?:code|verification|passcode)\D{0,20}(\d{6})/i);
+  const any = text.match(/\b(\d{6})\b/);
+  const code = near?.[1] ?? any?.[1];
+  if (!code) {
+    res.status(422).json({ ok: false, error: "no 6-digit code found in message" });
+    return;
+  }
+  const r = submitOtp(code);
+  res.status(200).json({ ok: true, consumed: r.consumed });
 }
 
 export function submitAuth(req: Request, res: Response): void {

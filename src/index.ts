@@ -1,7 +1,7 @@
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer } from "./mcp.js";
-import { renderAuthPage, submitAuth, ingestAuth, authStatus, triggerLogin, postOtp } from "./auth-page.js";
+import { renderAuthPage, submitAuth, ingestAuth, authStatus, triggerLogin, postOtp, smsWebhook } from "./auth-page.js";
 import { refreshAuthToken } from "./rm/client.js";
 import { sessionStatus } from "./rm/session.js";
 import { attemptLogin, autoLoginConfigured } from "./rm/login.js";
@@ -12,6 +12,8 @@ const PORT = Number(process.env.PORT ?? 8080);
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
+// Some SMS-forwarder apps POST the raw message as text/plain - capture it as a string.
+app.use(express.text({ type: ["text/plain"], limit: "64kb" }));
 
 // ── Health ─────────────────────────────────────────────────────────
 app.get("/healthz", (_req, res) => res.status(200).send("ok"));
@@ -22,15 +24,16 @@ app.get("/auth", renderAuthPage);
 app.post("/auth/submit", submitAuth);
 app.post("/auth/login", triggerLogin); // trigger headless auto-login
 app.post("/auth/otp", postOtp); // feed an SMS code to a parked login run
+app.post("/auth/sms", smsWebhook); // phone SMS-forwarder posts the RM code here (shared-secret guarded)
 
 // ── JSON API for the browser extension ─────────────────────────────
 // CORS is permissive: the extension service worker with host_permissions does
 // not trigger a preflight, but browser-context callers might. Auth is at the
 // Cloudflare Access edge (service token / OTP), not here.
-app.use(["/auth/ingest", "/auth/status"], (req, res, next) => {
+app.use(["/auth/ingest", "/auth/status", "/auth/sms"], (req, res, next) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.set("Access-Control-Allow-Headers", "content-type, cf-access-client-id, cf-access-client-secret");
+  res.set("Access-Control-Allow-Headers", "content-type, x-sms-secret, cf-access-client-id, cf-access-client-secret");
   if (req.method === "OPTIONS") return void res.status(204).end();
   next();
 });

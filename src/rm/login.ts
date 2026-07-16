@@ -65,18 +65,34 @@ interface OtpWaiter {
 }
 let pendingOtp: OtpWaiter | null = null;
 
+// A code can arrive (via the SMS webhook) a moment BEFORE the run parks, or after.
+// Buffer it briefly so ordering never loses a code: submitOtp resolves a waiter if
+// one is parked, else stashes the code; waitForOtp consumes a fresh buffered code
+// on arm. TTL keeps a stale code from satisfying a much-later run.
+let bufferedCode: { code: string; at: number } | null = null;
+const OTP_BUFFER_TTL = 120_000;
+
 /** True while a login run is blocked waiting for the user to submit an SMS code. */
 export function otpPending(): boolean {
   return pendingOtp !== null;
 }
 
-/** Feed an SMS code to the parked login run. Returns false if nothing is waiting. */
-export function submitOtp(code: string): boolean {
-  if (!pendingOtp) return false;
-  const w = pendingOtp;
-  pendingOtp = null;
-  w.resolve(code.trim());
-  return true;
+/**
+ * Provide an SMS code (from the /auth box or the SMS webhook). Resolves a parked
+ * waiter if there is one; otherwise buffers it (TTL) so a code that races ahead of
+ * the park still gets used. Returns { consumed } = whether a waiter took it now.
+ */
+export function submitOtp(code: string): { accepted: boolean; consumed: boolean } {
+  const c = code.trim();
+  if (!c) return { accepted: false, consumed: false };
+  if (pendingOtp) {
+    const w = pendingOtp;
+    pendingOtp = null;
+    w.resolve(c);
+    return { accepted: true, consumed: true };
+  }
+  bufferedCode = { code: c, at: Date.now() };
+  return { accepted: true, consumed: false };
 }
 
 /** Disarm an OTP waiter when the run ends, so it can't outlive the browser. */
@@ -88,6 +104,13 @@ function cancelOtp(): void {
 }
 
 function waitForOtp(timeoutMs: number): Promise<string | null> {
+  // A code that arrived just before we parked is waiting in the buffer - use it.
+  if (bufferedCode && Date.now() - bufferedCode.at < OTP_BUFFER_TTL) {
+    const c = bufferedCode.code;
+    bufferedCode = null;
+    return Promise.resolve(c);
+  }
+  bufferedCode = null; // drop anything stale
   return new Promise((resolve) => {
     pendingOtp = { resolve, since: Date.now() };
     setTimeout(() => {
