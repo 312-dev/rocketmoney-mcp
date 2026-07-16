@@ -175,6 +175,7 @@ export function smsWebhook(req: Request, res: Response): void {
   const want = process.env.ROCKETMONEY_SMS_WEBHOOK_SECRET ?? "";
   const got = String(req.header("x-sms-secret") ?? (req.query.secret as string) ?? "");
   if (!want || got !== want) {
+    console.warn("[sms-webhook] rejected: bad/missing secret");
     res.status(403).json({ ok: false, error: "forbidden" });
     return;
   }
@@ -189,11 +190,16 @@ export function smsWebhook(req: Request, res: Response): void {
   const any = text.match(/\b(\d{6})\b/);
   const code = near?.[1] ?? any?.[1];
   if (!code) {
-    res.status(422).json({ ok: false, error: "no 6-digit code found in message" });
+    // 200 (not an error): the app's TEST payload and any non-code text land here.
+    // Returning 2xx keeps the forwarder from retrying a message it can't use.
+    // Log only the length, never the body (may contain the code).
+    console.log(`[sms-webhook] hit, ${text.length} chars, no 6-digit code -> no-op`);
+    res.status(200).json({ ok: true, matched: false, note: "no 6-digit code in message" });
     return;
   }
   const r = submitOtp(code);
-  res.status(200).json({ ok: true, consumed: r.consumed });
+  console.log(`[sms-webhook] code received; consumed-by-parked-login=${r.consumed} (else buffered)`);
+  res.status(200).json({ ok: true, matched: true, consumed: r.consumed });
 }
 
 export function submitAuth(req: Request, res: Response): void {
