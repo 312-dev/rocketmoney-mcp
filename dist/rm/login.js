@@ -230,19 +230,18 @@ async function doLogin(reason) {
             }
         }
         // Path 2: a login form is present -> fill identifier-first Auth0 flow.
-        const emailEl = await firstVisible(page, [
-            "input[name='username']",
-            "input[type='email']",
-            "input#username",
-            "input[autocomplete='username']",
-        ]);
+        // Generous: every hop here is proxied through the home SOCKS exit, so Auth0's
+        // JS can take far longer to render its inputs than on a direct link. A 12s
+        // wait raced the render and reported "no login form" while the page was still
+        // painting (the failure screenshot showed a fully-rendered form).
+        const emailEl = await firstVisible(page, ["input[name='username']", "input[type='email']", "input#username", "input[autocomplete='username']"], 45000);
         if (!emailEl) {
             await snapshot(page, "noform");
             return { ok: false, error: "no session and no login form (possible attack-protection block; see noform.png)" };
         }
         await emailEl.click({ count: 3 });
         await emailEl.type(EMAIL(), { delay: 30 });
-        let pwEl = await firstVisible(page, ["input[type='password']", "input#password"], 2000);
+        let pwEl = await firstVisible(page, ["input[type='password']", "input#password"], 4000);
         if (!pwEl) {
             const cont = await firstVisible(page, ["button[type='submit']", "button[name='action']"]);
             if (cont)
@@ -250,7 +249,7 @@ async function doLogin(reason) {
             else
                 await emailEl.press("Enter");
             await sleep(2500);
-            pwEl = await firstVisible(page, ["input[type='password']", "input#password"], 12000);
+            pwEl = await firstVisible(page, ["input[type='password']", "input#password"], 30000);
         }
         if (!pwEl) {
             await snapshot(page, "nopassword");
