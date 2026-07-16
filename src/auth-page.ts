@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import { seedSession, sessionStatus } from "./rm/session.js";
+import { loadSession, normalizeCookieInput, parseCookieHeader, seedSession, sessionStatus } from "./rm/session.js";
 import { attemptLogin, submitOtp, otpPending, loginState } from "./rm/login.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -125,6 +125,18 @@ export function ingestAuth(req: Request, res: Response): void {
   const raw = String((req.body as { cookie?: string })?.cookie ?? "");
   if (!raw.trim()) {
     res.status(400).json({ ok: false, error: "missing cookie" });
+    return;
+  }
+  // Guard against a degraded push clobbering a good session. The Mac Mini refresher
+  // pushes the FULL jar (incl. the AWSALB* ALB-stickiness cookies needed to keep the
+  // rolling session alive). The browser extension pushes only tb.auth0.sid, which
+  // dies within minutes. So: if the incoming cookie has no AWSALB but the CURRENT
+  // live session does (a full jar), ignore the push - don't overwrite good with bad.
+  // When the current session is dead/sid-only, accept the push (recovery/bootstrap).
+  const incomingHasStickiness = parseCookieHeader(normalizeCookieInput(raw)).has("AWSALB");
+  const curJar = loadSession();
+  if (!incomingHasStickiness && curJar?.has("AWSALB")) {
+    res.status(200).json({ ok: true, ignored: true, reason: "sid-only push ignored; live full-jar session preserved" });
     return;
   }
   const err = seedSession(raw);
