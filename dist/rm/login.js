@@ -213,8 +213,13 @@ async function doLogin(reason) {
         }));
         const page = (await browser.pages())[0] ?? (await browser.newPage());
         await page.setUserAgent(USER_AGENT);
-        await page.goto(APP_URL, { waitUntil: "networkidle2", timeout: 60000 });
-        await sleep(1500);
+        // domcontentloaded, NOT networkidle2: the app fires a constant stream of
+        // analytics/tracker requests (__ps_*, Segment, Datadog, Stripe, Intercom), so
+        // over the proxied residential link the network never goes quiet and
+        // networkidle2 burns its full timeout and throws. The form is waited for by
+        // firstVisible() below anyway.
+        await page.goto(APP_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+        await sleep(2500);
         // Path 1: trusted profile silently renewed -> already have a session.
         {
             const s = await readSession(page);
