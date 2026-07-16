@@ -24,6 +24,11 @@ import { seedSession, sessionStatus } from "./session.js";
 const EMAIL = () => process.env.ROCKETMONEY_EMAIL ?? "";
 const PASSWORD = () => process.env.ROCKETMONEY_PASSWORD ?? "";
 const CHROMIUM = () => process.env.CHROMIUM_PATH ?? "/usr/bin/chromium";
+// Optional SOCKS5/HTTP proxy for Chromium's egress. Auth0 attack-protection
+// hard-blocks datacenter IPs, so on Fly we route the login browser through a
+// residential exit (a SOCKS5 proxy on the home Mac Mini, reached over Tailscale)
+// e.g. ROCKETMONEY_LOGIN_PROXY=socks5://100.93.15.8:7333. Empty = direct.
+const PROXY = () => process.env.ROCKETMONEY_LOGIN_PROXY ?? "";
 const STATE_DIR = () => process.env.ROCKETMONEY_STATE_DIR ?? "/data/rocketmoney";
 const PROFILE_DIR = () => join(STATE_DIR(), "chrome-profile");
 
@@ -166,21 +171,29 @@ async function doLogin(reason: string): Promise<LoginResult> {
     }
   }
 
-  console.log(`[auto-login] starting (${reason})`);
+  const proxy = PROXY();
+  console.log(`[auto-login] starting (${reason})${proxy ? ` via proxy ${proxy}` : ""}`);
   let browser: Browser | null = null;
   try {
+    const args = [
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--window-size=1280,900",
+    ];
+    // Route all of Chromium's traffic (incl. remote DNS) through the proxy so
+    // Auth0 sees the residential exit IP, not Fly's. --proxy-bypass-list=<-loopback>
+    // keeps the SOCKS handshake itself direct while sending every real host out.
+    if (proxy) {
+      args.push(`--proxy-server=${proxy}`, "--proxy-bypass-list=<-loopback>");
+    }
     browser = await puppeteer.launch({
       executablePath: CHROMIUM(),
       headless: true,
       userDataDir: profile,
-      args: [
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--window-size=1280,900",
-      ],
+      args,
       defaultViewport: { width: 1280, height: 900 },
       protocolTimeout: 120000,
     });
