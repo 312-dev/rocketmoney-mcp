@@ -66,9 +66,17 @@ function autoLoginBlock(): string {
   }
   const busy = st.inFlight ? " (in progress...)" : "";
   const cool = st.cooldownMs > 0 ? ` - next auto-attempt in ${Math.ceil(st.cooldownMs / 60000)}m` : "";
+  // Last run's outcome, persisted to the volume - host log streams drop lines,
+  // so this is the reliable record of what actually happened.
+  const lr = st.lastResult;
+  const last = lr
+    ? `<div style="margin-top:8px;font-size:13px">Last run (${lr.at}, ${lr.reason}): ${
+        lr.ok ? '<span class="ok">succeeded</span>' : `<span class="bad">failed</span> - ${lr.error ?? "?"}`
+      }</div>`
+    : "";
   return `<div class="status">
   <b>Automated login</b> is enabled${busy}. It drives a headless browser to refresh the
-  session when it dies${cool}.
+  session when it dies${cool}.${last}
   <form method="post" action="/auth/login" style="margin-top:10px">
     <button type="submit"${st.inFlight ? " disabled" : ""}>Log in now</button>
   </form>

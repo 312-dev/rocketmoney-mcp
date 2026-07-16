@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { addExtra } from "puppeteer-extra";
 import Stealth from "puppeteer-extra-plugin-stealth";
@@ -61,6 +61,14 @@ export function submitOtp(code) {
     w.resolve(code.trim());
     return true;
 }
+/** Disarm an OTP waiter when the run ends, so it can't outlive the browser. */
+function cancelOtp() {
+    if (!pendingOtp)
+        return;
+    const w = pendingOtp;
+    pendingOtp = null;
+    w.resolve(null);
+}
 function waitForOtp(timeoutMs) {
     return new Promise((resolve) => {
         pendingOtp = { resolve, since: Date.now() };
@@ -75,6 +83,27 @@ function waitForOtp(timeoutMs) {
 let inFlight = null;
 let lastAttempt = 0;
 let failures = 0;
+function recordResult(reason, r) {
+    try {
+        const dir = STATE_DIR();
+        if (!existsSync(dir))
+            mkdirSync(dir, { recursive: true });
+        const row = { at: new Date().toISOString(), reason, ...r };
+        writeFileSync(join(dir, "login-last.json"), JSON.stringify(row, null, 2));
+    }
+    catch {
+        /* never let bookkeeping break a login */
+    }
+}
+/** The last login run's outcome (survives restarts). Null if none recorded. */
+export function lastLoginResult() {
+    try {
+        return JSON.parse(readFileSync(join(STATE_DIR(), "login-last.json"), "utf8"));
+    }
+    catch {
+        return null;
+    }
+}
 const MIN_INTERVAL_MS = 15 * 60 * 1000; // never re-login more than ~4x/hour
 const MAX_BACKOFF_MS = 6 * 60 * 60 * 1000; // cap backoff at 6h
 function backoffMs() {
@@ -105,11 +134,14 @@ export function attemptLogin(reason, force = false) {
     inFlight = doLogin(reason)
         .then((r) => {
         failures = r.ok ? 0 : failures + 1;
+        recordResult(reason, r);
         return r;
     })
         .catch((e) => {
         failures += 1;
-        return { ok: false, error: String(e?.message ?? e) };
+        const r = { ok: false, error: String(e?.message ?? e) };
+        recordResult(reason, r);
+        return r;
     })
         .finally(() => {
         lastAttempt = Date.now();
@@ -227,24 +259,38 @@ async function doLogin(reason) {
         await submit.click();
         console.log("[auto-login] credentials submitted");
         // Path 3: watch for either success, or an SMS challenge we must satisfy.
+        //
+        // The OTP wait is ARMED but never awaited inline: the loop must keep polling
+        // the page the whole time. A session can appear while an OTP is outstanding -
+        // MFA satisfied out-of-band (someone types the code into the window, a push
+        // approval lands, or Auth0 declines to challenge). Awaiting the OTP inline
+        // blinded this loop, so a completed login sat unnoticed until timeout.
         const overall = Date.now() + 5 * 60 * 1000; // generous: covers one OTP round-trip
-        let handledOtp = false;
+        let otpArmed = false;
+        let otpSubmitted = false;
+        let inboundCode = null;
         while (Date.now() < overall) {
             await sleep(1500);
+            // Always check for a session FIRST, on every tick, whatever else is pending.
             const s = await readSession(page);
             if (s.sid) {
                 seedSession(s.header);
-                console.log(`[auto-login] success${handledOtp ? " (after SMS)" : ""}`);
+                console.log(`[auto-login] success${otpArmed ? " (MFA satisfied)" : ""}`);
                 return { ok: true };
             }
-            const url = page.url();
-            if (/mfa-sms-challenge|mfa/.test(url) && !handledOtp) {
+            // Arm the OTP waiter once, without blocking this loop.
+            if (/mfa-sms-challenge|mfa/.test(page.url()) && !otpArmed) {
+                otpArmed = true;
                 console.log("[auto-login] SMS challenge - waiting for code via /auth");
-                const code = await waitForOtp(4 * 60 * 1000);
-                if (!code) {
-                    await snapshot(page, "mfa-timeout");
-                    return { ok: false, needsOtp: true, error: "SMS code not supplied in time" };
-                }
+                void waitForOtp(4 * 60 * 1000).then((c) => {
+                    inboundCode = c;
+                });
+            }
+            // A code arrived via /auth/otp -> type it once.
+            if (inboundCode && !otpSubmitted) {
+                const code = inboundCode;
+                inboundCode = null;
+                otpSubmitted = true;
                 const codeEl = await firstVisible(page, [
                     "input[name='code']",
                     "input#code",
@@ -252,21 +298,35 @@ async function doLogin(reason) {
                     "input[inputmode='numeric']",
                     "input[type='text']",
                 ]);
-                if (!codeEl)
-                    return { ok: false, error: "could not find SMS code field" };
-                await codeEl.click({ count: 3 });
-                await codeEl.type(code, { delay: 40 });
-                const verify = await firstVisible(page, ["button[type='submit']", "button[name='action']"]);
-                if (verify)
-                    await verify.click();
-                handledOtp = true;
-                console.log("[auto-login] SMS code submitted");
+                if (codeEl) {
+                    await codeEl.click({ count: 3 });
+                    await codeEl.type(code, { delay: 40 });
+                    const verify = await firstVisible(page, ["button[type='submit']", "button[name='action']"]);
+                    if (verify)
+                        await verify.click();
+                    console.log("[auto-login] SMS code submitted");
+                }
+                else {
+                    // Page already moved on (e.g. MFA completed another way) - keep polling
+                    // for the session rather than failing outright.
+                    console.warn("[auto-login] code supplied but no code field; still watching for a session");
+                }
             }
         }
-        await snapshot(page, "timeout");
-        return { ok: false, error: "timed out without a session cookie" };
+        await snapshot(page, otpArmed ? "mfa-timeout" : "timeout");
+        return {
+            ok: false,
+            needsOtp: otpArmed && !otpSubmitted,
+            error: otpArmed
+                ? "reached the SMS challenge but no session appeared (code not supplied in time?)"
+                : "timed out without a session cookie",
+        };
     }
     finally {
+        // Disarm any outstanding OTP waiter: the browser is going away, so a code
+        // submitted after this point has nowhere to go (and would leave /auth
+        // claiming an OTP is pending forever).
+        cancelOtp();
         await browser?.close().catch(() => { });
     }
 }
@@ -289,5 +349,6 @@ export function loginState() {
         cooldownMs: loginCooldownMs(),
         failures,
         sessionStatus: sessionStatus().status,
+        lastResult: lastLoginResult(),
     };
 }
