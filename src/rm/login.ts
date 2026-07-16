@@ -284,6 +284,18 @@ async function doLogin(reason: string): Promise<LoginResult> {
     const page = (await browser.pages())[0] ?? (await browser.newPage());
     await page.setUserAgent(USER_AGENT);
 
+    // Detect a browser/tab death so the poll loop fails fast instead of spinning
+    // against a dead page for the full timeout (a headful Chrome can get OOM-killed
+    // mid-run). The loop checks this flag every tick.
+    let browserDead = false;
+    browser.on("disconnected", () => {
+      browserDead = true;
+    });
+    page.on("error", (e) => {
+      browserDead = true;
+      console.warn(`[auto-login] page crashed: ${(e as Error).message}`);
+    });
+
     // domcontentloaded, NOT networkidle2: the app fires a constant stream of
     // analytics/tracker requests (__ps_*, Segment, Datadog, Stripe, Intercom), so
     // over the proxied residential link the network never goes quiet and
@@ -360,6 +372,10 @@ async function doLogin(reason: string): Promise<LoginResult> {
 
     while (Date.now() < overall) {
       await sleep(1500);
+      // Bail immediately if the browser/tab died - don't spin on a dead page.
+      if (browserDead || page.isClosed()) {
+        return { ok: false, error: "browser crashed/disconnected mid-login (check VM memory)" };
+      }
       // The whole body is best-effort: the page redirects underneath us (email->
       // password, submit->MFA, MFA->callback), and any call landing mid-navigation
       // throws "Execution context was destroyed". Since this is a poll loop, we
