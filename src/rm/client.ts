@@ -47,12 +47,36 @@ interface GraphQLBody {
   variables?: Record<string, unknown>;
 }
 
+// Serialize every RM API call. The session cookie is a ROLLING token: each
+// response rotates it (Set-Cookie), and we persist the rotated jar. Two calls in
+// flight at once both send the same pre-rotation cookie; RM rotates it for the
+// first and the second's copy is instantly stale -> 401 -> the whole session is
+// marked dead. So a bot firing parallel tool calls (session_status + list_accounts
+// + budgets) would knock itself offline. Chaining calls onto a single promise
+// makes load-jar -> request -> save-jar atomic; concurrent callers just queue.
+let rmChain: Promise<unknown> = Promise.resolve();
+
 /**
  * Core executor: POST a full GraphQL body with the live cookie jar, rotate the
  * jar from the response's Set-Cookie headers, and persist it. Throws
  * RMAuthError if the session is dead so callers can report "re-auth needed".
+ * Serialized via rmChain so concurrent requests can't race the rolling cookie.
  */
-async function rmExecute<T = unknown>(opName: string, payload: Record<string, unknown>): Promise<T> {
+function rmExecute<T = unknown>(opName: string, payload: Record<string, unknown>): Promise<T> {
+  const run = rmChain.then(
+    () => rmExecuteUnlocked<T>(opName, payload),
+    () => rmExecuteUnlocked<T>(opName, payload), // run even if the previous call rejected
+  );
+  // Keep the chain alive regardless of this call's outcome (swallow here only;
+  // the real result/rejection still propagates to the caller via `run`).
+  rmChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+async function rmExecuteUnlocked<T = unknown>(opName: string, payload: Record<string, unknown>): Promise<T> {
   const jar = loadSession();
   if (!jar) throw new RMAuthError("No Rocket Money session. Paste a fresh cookie at /auth.");
 
