@@ -4,8 +4,6 @@ import { RMAuthError } from "./rm/client.js";
 import * as rm from "./rm/client.js";
 import * as fmt from "./rm/format.js";
 import { sessionStatus } from "./rm/session.js";
-import { getSchedulerConfig, runNow, setSchedulerConfig } from "./amazon/scheduler.js";
-import { syncAmazonSince } from "./amazon/sync.js";
 
 const AUTH_HINT =
   "Rocket Money session is not active. Open the auth page (rocketmoney-auth.graysons.network) and paste a fresh `tb.auth0.sid` cookie from a logged-in app.rocketmoney.com browser tab.";
@@ -31,7 +29,7 @@ export function buildServer(): McpServer {
     { name: "rocketmoney", version: "1.0.0" },
     {
       instructions:
-        "Access to the user's Rocket Money finances: accounts and balances, transactions, spending by category, budgets, net worth, and subscriptions (all read-only, USD). The ONLY tools that write to Rocket Money are the amazon_sync_* tools: they enrich Amazon transactions by setting each one's note to the ordered item name and its spending category, matched from Amazon order-confirmation emails. amazon_sync_preview is a safe dry run; amazon_sync_apply writes; amazon_sync_enable/disable control an autonomous background sync. If a tool reports the session is inactive, the user must re-authenticate at the auth page.",
+        "Access to the user's Rocket Money finances (USD). Read tools: accounts and balances, transactions, spending by category, budgets, net worth, subscriptions, and the category catalog (list_categories). Write tools MUTATE the account: set_transaction_note sets/clears a transaction's note; set_transaction_category recategorizes a transaction (optionally every related transaction from the same merchant). To recategorize, first call list_categories to see valid labels/ids, then pass a label like \"Groceries\" (or a category id) to set_transaction_category. If a tool reports the session is inactive, the user must re-authenticate at the auth page.",
     },
   );
 
@@ -206,102 +204,85 @@ export function buildServer(): McpServer {
     }),
   );
 
-  // ── Amazon enrichment (the only WRITE tools) ─────────────────────
+  server.registerTool(
+    "list_categories",
+    {
+      title: "List spending categories",
+      description:
+        "The user's full Rocket Money category catalog (default + custom), each with its label, node id, and type (expense/income/ignored). Call this to discover valid categories before recategorizing a transaction with set_transaction_category.",
+      inputSchema: {},
+      annotations: READ,
+    },
+    tool(async () => {
+      const cats = await rm.getTransactionCategories();
+      return {
+        count: cats.length,
+        categories: cats.map((c) => ({
+          id: c.id,
+          nodeId: c.nodeId,
+          label: c.label,
+          type: c.type,
+          categoryType: c.categoryType,
+          includeInSpending: c.includeInSpending,
+        })),
+      };
+    }),
+  );
+
+  // ── Write tools (these MUTATE Rocket Money) ──────────────────────
   const WRITE = { readOnlyHint: false, openWorldHint: true } as const;
 
   server.registerTool(
-    "amazon_sync_preview",
+    "set_transaction_note",
     {
-      title: "Preview Amazon sync",
+      title: "Set transaction note",
       description:
-        "DRY RUN: match recent Amazon transactions to Amazon order-confirmation emails and show what note (item name) + category WOULD be written. Writes nothing. Use this before amazon_sync_apply.",
+        "WRITES to Rocket Money: set (or clear) the free-text note on one transaction. Pass the transaction id from search_transactions/category_transactions. Use an empty string to clear the note. Returns the saved note.",
       inputSchema: {
-        since_days: z
-          .number()
-          .int()
-          .min(1)
-          .max(400)
+        transaction_id: z.string().describe("The transaction node id (the `id` from search_transactions)"),
+        note: z.string().describe("The note text to save. Pass an empty string to clear it."),
+      },
+      annotations: WRITE,
+    },
+    tool(async ({ transaction_id, note }: { transaction_id: string; note: string }) => {
+      const saved = await rm.setTransactionNote(transaction_id, note);
+      return { transaction_id, note: saved, ok: true };
+    }),
+  );
+
+  server.registerTool(
+    "set_transaction_category",
+    {
+      title: "Set transaction category",
+      description:
+        "WRITES to Rocket Money: recategorize one transaction. `category` accepts a category label (e.g. \"Groceries\"), a numeric category id, or a category node id - call list_categories first to see valid options. Set apply_to_all=true to recategorize every related transaction from the same merchant, not just this one.",
+      inputSchema: {
+        transaction_id: z.string().describe("The transaction node id (the `id` from search_transactions)"),
+        category: z
+          .string()
+          .describe("Target category: a label like 'Groceries', a numeric id, or a category node id"),
+        apply_to_all: z
+          .boolean()
           .optional()
-          .describe("Look back this many days (default: the scheduler's lookback, 10)"),
-      },
-      annotations: READ,
-    },
-    tool(async ({ since_days }: { since_days?: number }) => runNow(true, since_days)),
-  );
-
-  server.registerTool(
-    "amazon_sync_apply",
-    {
-      title: "Apply Amazon sync",
-      description:
-        "WRITES to Rocket Money: enrich recent Amazon transactions by setting each one's note to the ordered item name and its spending category. Idempotent (skips rows already synced unchanged). Run amazon_sync_preview first to see the changes.",
-      inputSchema: {
-        since_days: z.number().int().min(1).max(400).optional().describe("Look back this many days (default 10)"),
+          .describe("Also recategorize all related transactions from the same merchant (default false)"),
       },
       annotations: WRITE,
     },
-    tool(async ({ since_days }: { since_days?: number }) => runNow(false, since_days)),
-  );
-
-  server.registerTool(
-    "amazon_sync_backfill",
-    {
-      title: "Backfill Amazon sync",
-      description:
-        "WRITES to Rocket Money: one historical enrichment pass over every Amazon transaction on/after a date. Searches Amazon confirmation emails across Inbox, Archive, Trash, and Junk. Idempotent.",
-      inputSchema: {
-        since: z.string().describe("Enrich transactions on/after this date (YYYY-MM-DD)"),
-        dry_run: z.boolean().optional().describe("Preview only, write nothing (default false)"),
+    tool(
+      async ({
+        transaction_id,
+        category,
+        apply_to_all,
+      }: {
+        transaction_id: string;
+        category: string;
+        apply_to_all?: boolean;
+      }) => {
+        const catNodeId = await rm.resolveCategoryNodeId(category);
+        const updated = await rm.setTransactionCategory(transaction_id, catNodeId, apply_to_all ?? false);
+        return { transaction_id, category, categoryNodeId: catNodeId, updatedCount: updated, ok: true };
       },
-      annotations: WRITE,
-    },
-    tool(async ({ since, dry_run }: { since: string; dry_run?: boolean }) =>
-      syncAmazonSince(since, dry_run ?? false),
     ),
-  );
-
-  server.registerTool(
-    "amazon_sync_status",
-    {
-      title: "Amazon sync status",
-      description:
-        "Show the autonomous Amazon-sync scheduler state (enabled, interval, lookback, last run + last run's summary) and whether the Rocket Money session is live.",
-      inputSchema: {},
-      annotations: READ,
-    },
-    tool(async () => ({ scheduler: getSchedulerConfig(), session: sessionStatus() })),
-  );
-
-  server.registerTool(
-    "amazon_sync_enable",
-    {
-      title: "Enable autonomous Amazon sync",
-      description:
-        "Turn ON the background Amazon-sync scheduler. It then WRITES enrichment to Rocket Money every `interval_hours` (default 6) over the last `lookback_days` (default 10), whenever the session is live. Disabled by default.",
-      inputSchema: {
-        interval_hours: z.number().int().min(1).max(168).optional().describe("Hours between runs (default 6)"),
-        lookback_days: z.number().int().min(1).max(60).optional().describe("Days looked back each run (default 10)"),
-      },
-      annotations: WRITE,
-    },
-    tool(async ({ interval_hours, lookback_days }: { interval_hours?: number; lookback_days?: number }) =>
-      setSchedulerConfig({
-        enabled: true,
-        ...(interval_hours !== undefined ? { intervalHours: interval_hours } : {}),
-        ...(lookback_days !== undefined ? { lookbackDays: lookback_days } : {}),
-      }),
-    ),
-  );
-
-  server.registerTool(
-    "amazon_sync_disable",
-    {
-      title: "Disable autonomous Amazon sync",
-      description: "Turn OFF the background Amazon-sync scheduler. On-demand amazon_sync_apply/preview still work.",
-      inputSchema: {},
-      annotations: WRITE,
-    },
-    tool(async () => setSchedulerConfig({ enabled: false })),
   );
 
   return server;

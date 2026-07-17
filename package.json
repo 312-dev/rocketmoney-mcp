@@ -1,7 +1,7 @@
 {
   "name": "rocketmoney-mcp",
   "version": "1.0.0",
-  "description": "Read-only Model Context Protocol server for Rocket Money (accounts, transactions, spending, net worth). No write operations.",
+  "description": "Model Context Protocol server for Rocket Money: read finances (accounts, transactions, spending, budgets, net worth, subscriptions, categories) and write transaction notes + categories.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -18,7 +18,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.110.0",
     "@modelcontextprotocol/sdk": "^1.27.0",
     "express": "^4.21.2",
     "jmap-jam": "^0.13.2",

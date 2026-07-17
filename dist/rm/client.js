@@ -20,6 +20,10 @@ const PERSISTED = {
     RecurringUpcomingPage: "f1dd34f01b69dd0367a8b20a07b8b45977ab6d1ce0d31919b1b4143e5ba205bc",
     TransactionCategoryPage: "1edf87cac5ca2a6428aeea4e35ae0521d0707f1e6e1fba6715ddc1d2a634fddf",
     TransactionsPageTransactionTable: "5bc74a0e8d2c33efe103eeb87d6ec09d9b57fb34795597ef2e3f7d892d76a056",
+    // The user's full category catalog (default + custom), with node ids. Captured
+    // from app.rocketmoney.com.har (2026-07-05). Read-only; rotating is handled the
+    // same as any other persisted read (PersistedQueryNotFound -> re-capture).
+    TransactionCategories: "b8734a0ec18579870ec0e707beca2a05450193c99e55df6f165be9d18a53e6b4",
 };
 /** Thrown when the session is no longer authenticated (cookie expired/revoked). */
 export class RMAuthError extends Error {
@@ -29,6 +33,24 @@ export class RMAuthError extends Error {
 // passes a numeric id (e.g. a category number from another screen).
 export function toNodeId(type, numericId) {
     return Buffer.from(`${type}:${numericId}`).toString("base64");
+}
+/** Inverse of toNodeId: decode a Relay node id into `{ type, numericId }`, or null. */
+export function fromNodeId(nodeId) {
+    try {
+        const decoded = Buffer.from(nodeId, "base64").toString("utf8");
+        const idx = decoded.indexOf(":");
+        if (idx <= 0)
+            return null;
+        const type = decoded.slice(0, idx);
+        const numericId = decoded.slice(idx + 1);
+        // Round-trip guard: reject inputs that aren't really base64 node ids.
+        if (!/^[A-Za-z]+$/.test(type) || toNodeId(type, numericId) !== nodeId)
+            return null;
+        return { type, numericId };
+    }
+    catch {
+        return null;
+    }
 }
 // Serialize every RM API call. The session cookie is a ROLLING token: each
 // response rotates it (Set-Cookie), and we persist the rotated jar. Two calls in
@@ -307,24 +329,87 @@ export async function searchTransactions(query, gteDate, maxPages = 6) {
     const seen = new Set();
     return all.filter((t) => (seen.has(t.nodeId) ? false : (seen.add(t.nodeId), true)));
 }
-// ── Write operations (Amazon enrichment) ──────────────────────────
-// These MUTATE Rocket Money. Everything above is read-only; keep it that way.
 /** base64(`TransactionCategory:<id>`) for a numeric category id. */
 export function categoryNodeId(numericId) {
     return toNodeId("TransactionCategory", numericId);
 }
-/** WRITE: set a transaction's free-text note (used to store the Amazon item name). */
-export async function setTransactionNote(nodeId, note) {
-    await rmMutation("SetTransactionNote", "mutation SetTransactionNote($input: SetTransactionNoteInput!) {\n  setTransactionNote(input: $input) {\n    __typename\n    transaction {\n      __typename\n      id\n      note\n    }\n  }\n}", { input: { transactionNodeId: nodeId, note } });
+/** READ: the user's full category catalog (default + custom), with node ids. */
+export async function getTransactionCategories() {
+    const data = await rmGraphQL({ operationName: "TransactionCategories" });
+    const nodes = [];
+    collectByType(data, "TransactionCategory", nodes);
+    const seen = new Set();
+    const cats = [];
+    for (const o of nodes) {
+        const nodeId = typeof o.id === "string" ? o.id : "";
+        if (!nodeId || seen.has(nodeId))
+            continue;
+        seen.add(nodeId);
+        cats.push({
+            nodeId,
+            id: fromNodeId(nodeId)?.numericId ?? "",
+            label: String(o.label ?? ""),
+            type: String(o.type ?? ""),
+            categoryType: String(o.categoryType ?? ""),
+            includeInSpending: Boolean(o.includeInSpending),
+            includeInEarnings: Boolean(o.includeInEarnings),
+            taxDeductible: Boolean(o.taxDeductible),
+        });
+    }
+    return cats.sort((a, b) => a.label.localeCompare(b.label));
 }
-/** WRITE: set a transaction's spending category. */
-export async function setTransactionCategory(nodeId, catNodeId) {
-    await rmMutation("SetTransactionCategory", "mutation SetTransactionCategory($input: SetTransactionCategoryInput!) {\n  setTransactionCategory(input: $input) {\n    __typename\n    updatedTransactions {\n      id\n      __typename\n    }\n  }\n}", {
+// Per-process memo of the category catalog. Categories change rarely and the Fly
+// machine stays warm, so caching spares a round-trip on every label resolution.
+let _catCache = null;
+const CAT_TTL_MS = 10 * 60 * 1000;
+async function categoriesCached() {
+    if (_catCache && Date.now() - _catCache.at < CAT_TTL_MS)
+        return _catCache.cats;
+    const cats = await getTransactionCategories();
+    _catCache = { at: Date.now(), cats };
+    return cats;
+}
+/**
+ * Resolve a caller-supplied category (a label like "Groceries", a numeric id, or
+ * a base64 TransactionCategory node id) to a node id. Throws a clear, actionable
+ * error listing valid labels when a label doesn't match.
+ */
+export async function resolveCategoryNodeId(input) {
+    const raw = String(input).trim();
+    // Already a TransactionCategory node id?
+    if (fromNodeId(raw)?.type === "TransactionCategory")
+        return raw;
+    // Bare numeric id -> build the node id (no lookup needed).
+    if (/^\d+$/.test(raw))
+        return categoryNodeId(raw);
+    // Otherwise treat it as a label and look it up (case-insensitive).
+    const cats = await categoriesCached();
+    const match = cats.find((c) => c.label.toLowerCase() === raw.toLowerCase());
+    if (match)
+        return match.nodeId;
+    throw new Error(`Unknown category "${raw}". Use list_categories to see valid options. Available: ${cats
+        .map((c) => c.label)
+        .join(", ")}`);
+}
+/** WRITE: set (or clear, with "") a transaction's free-text note. Returns the saved note. */
+export async function setTransactionNote(nodeId, note) {
+    const data = await rmMutation("SetTransactionNote", "mutation SetTransactionNote($input: SetTransactionNoteInput!) {\n  setTransactionNote(input: $input) {\n    __typename\n    transaction {\n      __typename\n      id\n      note\n    }\n  }\n}", { input: { transactionNodeId: nodeId, note } });
+    return data.setTransactionNote?.transaction?.note ?? note;
+}
+/**
+ * WRITE: set a transaction's spending category. `catNodeId` must be a
+ * TransactionCategory node id (use resolveCategoryNodeId to accept labels/ids).
+ * When `applyToAll` is true, RM re-categorizes every related transaction from the
+ * same merchant, not just this one.
+ */
+export async function setTransactionCategory(nodeId, catNodeId, applyToAll = false) {
+    const data = await rmMutation("SetTransactionCategory", "mutation SetTransactionCategory($input: SetTransactionCategoryInput!) {\n  setTransactionCategory(input: $input) {\n    __typename\n    updatedTransactions {\n      id\n      __typename\n    }\n  }\n}", {
         input: {
             transactionNodeId: nodeId,
             transactionCategoryNodeId: catNodeId,
-            categorizeAllRelatedTransactions: false,
+            categorizeAllRelatedTransactions: applyToAll,
         },
     });
+    return data.setTransactionCategory?.updatedTransactions?.length ?? 0;
 }
 export { findByType, collectByType };

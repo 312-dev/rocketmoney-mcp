@@ -1,14 +1,17 @@
 # rocketmoney-mcp
 
-A **read-only** [Model Context Protocol](https://modelcontextprotocol.io) server for
+A [Model Context Protocol](https://modelcontextprotocol.io) server for
 [Rocket Money](https://www.rocketmoney.com). It lets an MCP client (Claude Desktop,
 claude.ai, etc.) browse your accounts, transactions, spending, budgets, net worth,
-and subscriptions so you can *talk to an assistant about your finances*.
+and subscriptions so you can *talk to an assistant about your finances* - and make
+targeted edits (transaction notes + categories).
 
-It performs **no write operations** — every tool is annotated `readOnlyHint` and the
-server never mutates anything in your Rocket Money account.
+Reads are annotated `readOnlyHint`. The only mutating tools are `set_transaction_note`
+and `set_transaction_category` (`readOnlyHint: false`); everything else is read-only.
 
 ## Tools
+
+### Read
 
 | Tool | What it returns |
 | --- | --- |
@@ -20,10 +23,25 @@ server never mutates anything in your Rocket Money account.
 | `budgets` | Earnings and per-category spend across the last four months |
 | `subscriptions` | Active recurring charges with next-bill estimates |
 | `upcoming_bills` | Upcoming charges in the next N days |
-| `search_transactions` | Transactions by merchant text and/or date |
+| `search_transactions` | Transactions by merchant text and/or date (incl. current note + category) |
 | `category_transactions` | This month's transactions within one category |
+| `list_categories` | The full category catalog (default + custom) with labels + node ids |
 
-All amounts are returned in USD.
+### Write
+
+| Tool | What it does |
+| --- | --- |
+| `set_transaction_note` | Set (or clear) one transaction's free-text note |
+| `set_transaction_category` | Recategorize one transaction (accepts a category label, numeric id, or node id); optionally applies to all related transactions from the same merchant |
+
+All amounts are in USD. To recategorize, call `list_categories` first to see valid
+labels, then pass e.g. `category: "Groceries"` to `set_transaction_category` - the
+server resolves the label to the right node id.
+
+> **Amazon enrichment** (setting notes to the real item name + a fitting category,
+> matched from Amazon order emails) used to live here as dedicated `amazon_sync_*`
+> tools plus an autonomous scheduler. That has moved out to the on-demand
+> `rocketmoney-amazon-sync` skill, which drives the generic read/write tools above.
 
 ## How auth works
 
