@@ -5,6 +5,7 @@ import { renderAuthPage, submitAuth, ingestAuth, authStatus, triggerLogin, postO
 import { refreshAuthToken } from "./rm/client.js";
 import { sessionStatus } from "./rm/session.js";
 import { attemptLogin, autoLoginConfigured } from "./rm/login.js";
+import { newTransactions, resetCursor } from "./api.js";
 const PORT = Number(process.env.PORT ?? 8080);
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -34,6 +35,11 @@ app.use(["/auth/ingest", "/auth/status", "/auth/sms"], (req, res, next) => {
 });
 app.get("/auth/status", authStatus);
 app.post("/auth/ingest", ingestAuth);
+// ── Token-guarded JSON API (transactions since last check) ─────────
+// Auth is the ROCKETMONEY_API_TOKEN bearer/?token= check inside the handlers,
+// NOT Cloudflare Access - this is meant for unattended script callers.
+app.get("/api/transactions", newTransactions);
+app.post("/api/transactions/reset", resetCursor);
 // ── MCP endpoint (served on rocketmoney.graysons.network via Worker) ─
 // Stateless streamable HTTP: a fresh server+transport per request, torn down on
 // socket close, so the process holds no per-connection state and Fly can recycle
