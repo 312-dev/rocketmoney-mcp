@@ -4,7 +4,7 @@ import { RMAuthError } from "./rm/client.js";
 import * as rm from "./rm/client.js";
 import * as fmt from "./rm/format.js";
 import { sessionStatus } from "./rm/session.js";
-import { loadWatermark, nextSince, unseen, commit, resetWatermark } from "./rm/watermark.js";
+import { loadWatermark, nextSince, unseen, commit, resetWatermark, validSlug } from "./rm/watermark.js";
 
 // ── Token-guarded JSON API: "transactions since I last asked" ──────
 //
@@ -48,16 +48,32 @@ function authorized(req: Request): boolean {
   return secretEqual(got, want);
 }
 
+/**
+ * Resolve the feed slug from the route. Each slug is an INDEPENDENT consumer with
+ * its own cursor, so adding one never steals transactions from another - the
+ * default feed and /groceries each see every transaction exactly once.
+ *
+ * Returns undefined for the unslugged default feed, or false if the slug is
+ * malformed (it names a state file, so it must not escape the state dir).
+ */
+function feedSlug(req: Request): string | undefined | false {
+  const raw = req.params.slug;
+  if (raw === undefined) return undefined;
+  return validSlug(raw) ? raw : false;
+}
+
 /** Log the path only - never req.originalUrl, which carries ?token=. */
 function logHit(req: Request, note: string): void {
   console.log(`[api] ${req.method} ${req.path} ${note}`);
 }
 
 /**
- * GET /api/transactions
+ * GET /api/transactions          (default feed)
+ * GET /api/transactions/:slug    (named feed, e.g. /groceries)
  *
- * Returns every transaction not yet returned by a previous call, oldest first,
- * then advances the cursor.
+ * Returns every transaction not yet returned by a previous call ON THAT FEED,
+ * oldest first, then advances that feed's cursor. Feeds are independent: the
+ * same transaction is delivered once to each feed that asks for it.
  *
  *   ?peek=1   read without advancing the cursor (safe for testing)
  *   ?limit=N  cap the batch (the cursor still only advances over what was sent)
@@ -66,6 +82,17 @@ export async function newTransactions(req: Request, res: Response): Promise<void
   if (!authorized(req)) {
     logHit(req, "-> 401");
     res.status(401).json({ ok: false, error: "unauthorized" });
+    return;
+  }
+
+  const slug = feedSlug(req);
+  if (slug === false) {
+    logHit(req, "-> 400 (bad slug)");
+    res.status(400).json({
+      ok: false,
+      error: "invalid feed slug",
+      hint: "Lowercase letters, digits and dashes only (max 32 chars); 'reset' is reserved.",
+    });
     return;
   }
 
@@ -87,7 +114,7 @@ export async function newTransactions(req: Request, res: Response): Promise<void
     return;
   }
 
-  const row = loadWatermark();
+  const row = loadWatermark(slug);
   const since = nextSince(row);
 
   try {
@@ -99,11 +126,12 @@ export async function newTransactions(req: Request, res: Response): Promise<void
 
     // Commit AFTER the batch is finalized and BEFORE sending, so we never
     // advance past something we failed to serialize.
-    if (!peek) commit(since, batch);
+    if (!peek) commit(since, batch, new Date(), slug);
 
     logHit(req, `-> 200 (${batch.length} new of ${found.length} scanned${peek ? ", peek" : ""})`);
     res.json({
       ok: true,
+      feed: slug ?? "default",
       since,
       checked_at: new Date().toISOString(),
       previously_checked_at: row.lastCheckedAt,
@@ -136,9 +164,10 @@ export async function newTransactions(req: Request, res: Response): Promise<void
 }
 
 /**
- * POST /api/transactions/reset
+* POST /api/transactions/reset
+ * POST /api/transactions/:slug/reset
  *
- * Clears the cursor so the next GET re-emits the last lookback window. The
+ * Clears that feed's cursor so the next GET re-emits the last lookback window. The
  * escape hatch for the at-most-once tradeoff: if a consumer dropped a batch,
  * this is how you get it back.
  */
@@ -148,8 +177,19 @@ export function resetCursor(req: Request, res: Response): void {
     res.status(401).json({ ok: false, error: "unauthorized" });
     return;
   }
-  const before = loadWatermark();
-  resetWatermark();
+  const slug = feedSlug(req);
+  if (slug === false) {
+    logHit(req, "-> 400 (bad slug)");
+    res.status(400).json({ ok: false, error: "invalid feed slug" });
+    return;
+  }
+  const before = loadWatermark(slug);
+  resetWatermark(slug);
   logHit(req, "-> 200 (cursor reset)");
-  res.json({ ok: true, reset: true, previously_checked_at: before.lastCheckedAt });
+  res.json({
+    ok: true,
+    reset: true,
+    feed: slug ?? "default",
+    previously_checked_at: before.lastCheckedAt,
+  });
 }

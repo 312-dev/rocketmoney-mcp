@@ -28,8 +28,25 @@ const LOOKBACK_DAYS = Number(process.env.ROCKETMONEY_API_LOOKBACK_DAYS ?? 7);
 
 // Resolved lazily (not a module const) so the state dir can be swapped per
 // process/test via ROCKETMONEY_STATE_DIR - same convention as session.ts.
-function watermarkFile(): string {
-  return join(process.env.ROCKETMONEY_STATE_DIR ?? "/data/rocketmoney", "txn-watermark.json");
+//
+// Each SLUG is an independent consumer with its own cursor, so two pollers never
+// steal each other's transactions: the default feed and e.g. "groceries" each
+// see every transaction exactly once. The unslugged file keeps its original name
+// so the existing cursor survives this change.
+function watermarkFile(slug?: string | null): string {
+  const dir = process.env.ROCKETMONEY_STATE_DIR ?? "/data/rocketmoney";
+  return join(dir, slug ? `txn-watermark-${slug}.json` : "txn-watermark.json");
+}
+
+/**
+ * Slugs name a state FILE, so they must not be able to escape the state dir or
+ * collide with the unslugged default. Lowercase alphanumeric + dashes only.
+ * `reset` is reserved because POST /api/transactions/reset is the default feed's
+ * reset route - a slug of that name would make the two indistinguishable.
+ */
+export function validSlug(slug: string): boolean {
+  if (slug === "reset") return false;
+  return /^[a-z0-9][a-z0-9-]{0,31}$/.test(slug);
 }
 
 export interface SeenEntry {
@@ -51,9 +68,9 @@ function ensureDir(file: string): void {
 }
 
 /** Read the watermark, treating a missing/corrupt file as "never checked". */
-export function loadWatermark(): WatermarkRow {
+export function loadWatermark(slug?: string | null): WatermarkRow {
   try {
-    const row = JSON.parse(readFileSync(watermarkFile(), "utf8")) as Partial<WatermarkRow>;
+    const row = JSON.parse(readFileSync(watermarkFile(slug), "utf8")) as Partial<WatermarkRow>;
     return {
       lastCheckedAt: row.lastCheckedAt ?? null,
       lastSince: row.lastSince ?? null,
@@ -64,8 +81,8 @@ export function loadWatermark(): WatermarkRow {
   }
 }
 
-function writeWatermark(row: WatermarkRow): void {
-  const file = watermarkFile();
+function writeWatermark(row: WatermarkRow, slug?: string | null): void {
+  const file = watermarkFile(slug);
   ensureDir(file);
   writeFileSync(file, JSON.stringify(row, null, 2));
 }
@@ -100,8 +117,13 @@ export function unseen(row: WatermarkRow, txns: RMTransaction[]): RMTransaction[
  * is what makes this at-most-once - a crash before commit re-delivers instead
  * of skipping.
  */
-export function commit(since: string, emitted: RMTransaction[], ref = new Date()): WatermarkRow {
-  const prev = loadWatermark();
+export function commit(
+  since: string,
+  emitted: RMTransaction[],
+  ref = new Date(),
+  slug?: string | null,
+): WatermarkRow {
+  const prev = loadWatermark(slug);
   const merged = [...prev.seen, ...emitted.map((t) => ({ id: t.nodeId, date: t.date }))];
 
   // Prune below the next window's floor, not this one's: the next call anchors
@@ -116,11 +138,11 @@ export function commit(since: string, emitted: RMTransaction[], ref = new Date()
     lastSince: since,
     seen: [...byId.values()].sort((a, b) => (a.date < b.date ? -1 : 1)),
   };
-  writeWatermark(row);
+  writeWatermark(row, slug);
   return row;
 }
 
 /** Reset to "never checked" - the next call re-emits the last lookback window. */
-export function resetWatermark(): void {
-  writeWatermark({ ...EMPTY });
+export function resetWatermark(slug?: string | null): void {
+  writeWatermark({ ...EMPTY }, slug);
 }

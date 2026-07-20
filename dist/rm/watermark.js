@@ -24,8 +24,25 @@ import { ymd, addDays } from "./windows.js";
 const LOOKBACK_DAYS = Number(process.env.ROCKETMONEY_API_LOOKBACK_DAYS ?? 7);
 // Resolved lazily (not a module const) so the state dir can be swapped per
 // process/test via ROCKETMONEY_STATE_DIR - same convention as session.ts.
-function watermarkFile() {
-    return join(process.env.ROCKETMONEY_STATE_DIR ?? "/data/rocketmoney", "txn-watermark.json");
+//
+// Each SLUG is an independent consumer with its own cursor, so two pollers never
+// steal each other's transactions: the default feed and e.g. "groceries" each
+// see every transaction exactly once. The unslugged file keeps its original name
+// so the existing cursor survives this change.
+function watermarkFile(slug) {
+    const dir = process.env.ROCKETMONEY_STATE_DIR ?? "/data/rocketmoney";
+    return join(dir, slug ? `txn-watermark-${slug}.json` : "txn-watermark.json");
+}
+/**
+ * Slugs name a state FILE, so they must not be able to escape the state dir or
+ * collide with the unslugged default. Lowercase alphanumeric + dashes only.
+ * `reset` is reserved because POST /api/transactions/reset is the default feed's
+ * reset route - a slug of that name would make the two indistinguishable.
+ */
+export function validSlug(slug) {
+    if (slug === "reset")
+        return false;
+    return /^[a-z0-9][a-z0-9-]{0,31}$/.test(slug);
 }
 const EMPTY = { lastCheckedAt: null, lastSince: null, seen: [] };
 function ensureDir(file) {
@@ -34,9 +51,9 @@ function ensureDir(file) {
         mkdirSync(dir, { recursive: true });
 }
 /** Read the watermark, treating a missing/corrupt file as "never checked". */
-export function loadWatermark() {
+export function loadWatermark(slug) {
     try {
-        const row = JSON.parse(readFileSync(watermarkFile(), "utf8"));
+        const row = JSON.parse(readFileSync(watermarkFile(slug), "utf8"));
         return {
             lastCheckedAt: row.lastCheckedAt ?? null,
             lastSince: row.lastSince ?? null,
@@ -47,8 +64,8 @@ export function loadWatermark() {
         return { ...EMPTY };
     }
 }
-function writeWatermark(row) {
-    const file = watermarkFile();
+function writeWatermark(row, slug) {
+    const file = watermarkFile(slug);
     ensureDir(file);
     writeFileSync(file, JSON.stringify(row, null, 2));
 }
@@ -80,8 +97,8 @@ export function unseen(row, txns) {
  * is what makes this at-most-once - a crash before commit re-delivers instead
  * of skipping.
  */
-export function commit(since, emitted, ref = new Date()) {
-    const prev = loadWatermark();
+export function commit(since, emitted, ref = new Date(), slug) {
+    const prev = loadWatermark(slug);
     const merged = [...prev.seen, ...emitted.map((t) => ({ id: t.nodeId, date: t.date }))];
     // Prune below the next window's floor, not this one's: the next call anchors
     // on the timestamp we are about to write, so that is the oldest date any
@@ -96,10 +113,10 @@ export function commit(since, emitted, ref = new Date()) {
         lastSince: since,
         seen: [...byId.values()].sort((a, b) => (a.date < b.date ? -1 : 1)),
     };
-    writeWatermark(row);
+    writeWatermark(row, slug);
     return row;
 }
 /** Reset to "never checked" - the next call re-emits the last lookback window. */
-export function resetWatermark() {
-    writeWatermark({ ...EMPTY });
+export function resetWatermark(slug) {
+    writeWatermark({ ...EMPTY }, slug);
 }

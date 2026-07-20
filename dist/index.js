@@ -38,8 +38,14 @@ app.post("/auth/ingest", ingestAuth);
 // ── Token-guarded JSON API (transactions since last check) ─────────
 // Auth is the ROCKETMONEY_API_TOKEN bearer/?token= check inside the handlers,
 // NOT Cloudflare Access - this is meant for unattended script callers.
+// Each slug is an independent consumer with its own cursor, so /groceries and
+// the default feed both see every transaction exactly once. Slug routes are
+// declared AFTER the bare ones so /api/transactions/reset stays the default
+// feed's reset rather than being read as a slug named "reset".
 app.get("/api/transactions", newTransactions);
 app.post("/api/transactions/reset", resetCursor);
+app.get("/api/transactions/:slug", newTransactions);
+app.post("/api/transactions/:slug/reset", resetCursor);
 // ── MCP endpoint (served on rocketmoney.graysons.network via Worker) ─
 // Stateless streamable HTTP: a fresh server+transport per request, torn down on
 // socket close, so the process holds no per-connection state and Fly can recycle

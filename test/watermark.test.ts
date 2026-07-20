@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadWatermark, nextSince, unseen, commit, resetWatermark } from "../src/rm/watermark.js";
+import { loadWatermark, nextSince, unseen, commit, resetWatermark, validSlug } from "../src/rm/watermark.js";
 import type { RMTransaction } from "../src/rm/client.js";
 
 // Point the (lazily-resolved) state dir at a fresh temp dir per test.
@@ -91,4 +91,41 @@ test("reset re-opens the last window", () => {
 test("a corrupt state file degrades to 'never checked' rather than throwing", () => {
   writeFileSync(join(process.env.ROCKETMONEY_STATE_DIR!, "txn-watermark.json"), "{not json");
   assert.deepEqual(loadWatermark(), { lastCheckedAt: null, lastSince: null, seen: [] });
+});
+
+// ── per-slug feeds ────────────────────────────────────────────────
+
+test("slugged feeds are independent: each sees the same transaction once", () => {
+  const t = [txn("a", "2026-07-18"), txn("b", "2026-07-18")];
+  // Default feed consumes both.
+  commit("2026-07-12", t, at("2026-07-19"));
+  assert.deepEqual(unseen(loadWatermark(), t).map((x) => x.nodeId), []);
+  // The groceries feed has never seen them - consuming on one feed must not
+  // starve another, which is the entire point of the slug.
+  assert.deepEqual(unseen(loadWatermark("groceries"), t).map((x) => x.nodeId), ["a", "b"]);
+  commit("2026-07-12", t, at("2026-07-19"), "groceries");
+  assert.deepEqual(unseen(loadWatermark("groceries"), t).map((x) => x.nodeId), []);
+});
+
+test("resetting one feed leaves the others untouched", () => {
+  const t = [txn("a", "2026-07-18")];
+  commit("2026-07-12", t, at("2026-07-19"));
+  commit("2026-07-12", t, at("2026-07-19"), "groceries");
+  resetWatermark("groceries");
+  assert.deepEqual(unseen(loadWatermark("groceries"), t).map((x) => x.nodeId), ["a"]);
+  assert.deepEqual(unseen(loadWatermark(), t).map((x) => x.nodeId), []); // default intact
+});
+
+test("each feed keeps its own last-checked anchor", () => {
+  commit("2026-06-01", [], at("2026-06-08"));                 // default: stale
+  commit("2026-07-12", [], at("2026-07-19"), "groceries");    // groceries: fresh
+  assert.equal(nextSince(loadWatermark(), at("2026-07-19")), "2026-06-01");
+  assert.equal(nextSince(loadWatermark("groceries"), at("2026-07-19")), "2026-07-12");
+});
+
+test("slug validation refuses traversal, reserved names, and bad shapes", () => {
+  for (const ok of ["groceries", "g", "a-b-c", "feed2"]) assert.equal(validSlug(ok), true, ok);
+  for (const bad of ["reset", "../etc", "a/b", "A", "-lead", "", "x".repeat(33), "a_b", "a.b"]) {
+    assert.equal(validSlug(bad), false, bad);
+  }
 });
