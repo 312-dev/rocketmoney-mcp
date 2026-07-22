@@ -5,7 +5,7 @@ import { renderAuthPage, submitAuth, ingestAuth, authStatus, triggerLogin, postO
 import { refreshAuthToken } from "./rm/client.js";
 import { sessionStatus } from "./rm/session.js";
 import { attemptLogin, autoLoginConfigured } from "./rm/login.js";
-import { newTransactions, resetCursor } from "./api.js";
+import { newTransactions } from "./api.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -40,17 +40,15 @@ app.use(["/auth/ingest", "/auth/status", "/auth/sms"], (req, res, next) => {
 app.get("/auth/status", authStatus);
 app.post("/auth/ingest", ingestAuth);
 
-// ── Token-guarded JSON API (transactions since last check) ─────────
-// Auth is the ROCKETMONEY_API_TOKEN bearer/?token= check inside the handlers,
+// ── Token-guarded JSON API (last N days of transactions) ───────────
+// Auth is the ROCKETMONEY_API_TOKEN bearer/?token= check inside the handler,
 // NOT Cloudflare Access - this is meant for unattended script callers.
-// Each slug is an independent consumer with its own cursor, so /groceries and
-// the default feed both see every transaction exactly once. Slug routes are
-// declared AFTER the bare ones so /api/transactions/reset stays the default
-// feed's reset rather than being read as a slug named "reset".
+// Stateless snapshot: every read returns the same lookback window. Slugs still
+// name independent feeds (they set the `feed` label) but carry no cursor state,
+// so there is nothing to advance and no reset route. The bare route is declared
+// first; the slug route follows so a bare hit is not read as an empty slug.
 app.get("/api/transactions", newTransactions);
-app.post("/api/transactions/reset", resetCursor);
 app.get("/api/transactions/:slug", newTransactions);
-app.post("/api/transactions/:slug/reset", resetCursor);
 
 // ── MCP endpoint (served on rocketmoney.graysons.network via Worker) ─
 // Stateless streamable HTTP: a fresh server+transport per request, torn down on

@@ -3,16 +3,17 @@ import { RMAuthError } from "./rm/client.js";
 import * as rm from "./rm/client.js";
 import * as fmt from "./rm/format.js";
 import { sessionStatus } from "./rm/session.js";
-import { loadWatermark, nextSince, unseen, commit, resetWatermark, validSlug } from "./rm/watermark.js";
-// ── Token-guarded JSON API: "transactions since I last asked" ──────
+import { lookbackSince, LOOKBACK_DAYS, validSlug } from "./rm/feeds.js";
+// ── Token-guarded JSON API: "the last N days of transactions" ──────
 //
 // Sibling of /mcp, not a client of it: both call rm.searchTransactions() over
 // the same persisted cookie jar. Routing a machine caller back out through the
 // MCP JSON-RPC envelope would buy nothing but a round trip.
 //
-// The cursor is AT-MOST-ONCE by request: a successful response advances the
-// watermark, so a consumer that crashes after receiving the body will not see
-// those transactions again. Use ?peek=1 to read without advancing.
+// The feed is STATELESS: every read returns the same fixed lookback window
+// (LOOKBACK_DAYS ending today), unfiltered. There is no cursor to advance and
+// nothing to reset - re-polling is idempotent. The response carries a
+// `last_scanned` timestamp in place of the cursor callers used to track.
 /**
  * Compare via SHA-256 digests rather than the raw strings: timingSafeEqual
  * throws on length mismatch, and digesting makes every comparison fixed-width,
@@ -67,12 +68,10 @@ function logHit(req, note) {
  * GET /api/transactions          (default feed)
  * GET /api/transactions/:slug    (named feed, e.g. /groceries)
  *
- * Returns every transaction not yet returned by a previous call ON THAT FEED,
- * oldest first, then advances that feed's cursor. Feeds are independent: the
- * same transaction is delivered once to each feed that asks for it.
- *
- *   ?peek=1   read without advancing the cursor (safe for testing)
- *   ?limit=N  cap the batch (the cursor still only advances over what was sent)
+ * Returns the last LOOKBACK_DAYS of transactions, oldest first, unfiltered.
+ * Stateless: the same call always returns the same window, so re-polling is
+ * idempotent. Slugs still name independent feeds but no longer carry any
+ * server-side state - they only change the `feed` label on the response.
  */
 export async function newTransactions(req, res) {
     if (!authorized(req)) {
@@ -90,9 +89,6 @@ export async function newTransactions(req, res) {
         });
         return;
     }
-    const peek = req.query.peek === "1" || req.query.peek === "true";
-    const rawLimit = Number(req.query.limit);
-    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : null;
     // Surface a dead session as 503 + a hint rather than an empty 200, so a poller
     // can alert instead of quietly believing there was no spending.
     const session = sessionStatus();
@@ -106,29 +102,23 @@ export async function newTransactions(req, res) {
         });
         return;
     }
-    const row = loadWatermark(slug);
-    const since = nextSince(row);
+    const lastScanned = new Date();
+    const since = lookbackSince(lastScanned);
     try {
         const found = await rm.searchTransactions(null, since);
-        const fresh = unseen(row, found);
-        // Oldest first: "what happened since I last looked" reads chronologically.
-        fresh.sort((a, b) => (a.date === b.date ? a.nodeId.localeCompare(b.nodeId) : a.date < b.date ? -1 : 1));
-        const batch = limit === null ? fresh : fresh.slice(0, limit);
-        // Commit AFTER the batch is finalized and BEFORE sending, so we never
-        // advance past something we failed to serialize.
-        if (!peek)
-            commit(since, batch, new Date(), slug);
-        logHit(req, `-> 200 (${batch.length} new of ${found.length} scanned${peek ? ", peek" : ""})`);
+        // Oldest first: the window reads chronologically, like a statement.
+        found.sort((a, b) => (a.date === b.date ? a.nodeId.localeCompare(b.nodeId) : a.date < b.date ? -1 : 1));
+        logHit(req, `-> 200 (${found.length} in last ${LOOKBACK_DAYS}d)`);
         res.json({
+            // last_scanned leads the body: it is the timestamp that replaced the
+            // cursor - "as of when this window was read", not a delta boundary.
+            last_scanned: lastScanned.toISOString(),
             ok: true,
             feed: slug ?? "default",
             since,
-            checked_at: new Date().toISOString(),
-            previously_checked_at: row.lastCheckedAt,
-            cursor_advanced: !peek,
-            count: batch.length,
-            truncated: batch.length < fresh.length,
-            transactions: batch.map((t) => ({
+            lookback_days: LOOKBACK_DAYS,
+            count: found.length,
+            transactions: found.map((t) => ({
                 id: t.nodeId,
                 date: t.date,
                 amount: fmt.usd(t.amountCents),
@@ -152,34 +142,4 @@ export async function newTransactions(req, res) {
         console.error("[api] transactions error:", err);
         res.status(502).json({ ok: false, error: "upstream error", detail: String(err) });
     }
-}
-/**
-* POST /api/transactions/reset
- * POST /api/transactions/:slug/reset
- *
- * Clears that feed's cursor so the next GET re-emits the last lookback window. The
- * escape hatch for the at-most-once tradeoff: if a consumer dropped a batch,
- * this is how you get it back.
- */
-export function resetCursor(req, res) {
-    if (!authorized(req)) {
-        logHit(req, "-> 401");
-        res.status(401).json({ ok: false, error: "unauthorized" });
-        return;
-    }
-    const slug = feedSlug(req);
-    if (slug === false) {
-        logHit(req, "-> 400 (bad slug)");
-        res.status(400).json({ ok: false, error: "invalid feed slug" });
-        return;
-    }
-    const before = loadWatermark(slug);
-    resetWatermark(slug);
-    logHit(req, "-> 200 (cursor reset)");
-    res.json({
-        ok: true,
-        reset: true,
-        feed: slug ?? "default",
-        previously_checked_at: before.lastCheckedAt,
-    });
 }
