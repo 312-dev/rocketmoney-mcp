@@ -235,32 +235,24 @@ export async function getAssets() {
     }));
 }
 /**
- * WRITE: set a manual asset's value (in cents). Looks up the asset's current
- * name/type/includeInNetWorth and sends them alongside the new valueCents,
- * mirroring the web app's proven-safe UpdateAsset payload so no field is nulled.
- * Throws if the asset id isn't found. Returns the updated asset.
+ * WRITE: set a manual asset's value (in cents). RM stores asset values as a
+ * dated time series, so setting the value means recording a value point for
+ * today via `createAssetValue` (same-date calls update in place - no duplicate).
+ * `UpdateAsset` only edits name/type/includeInNetWorth; it rejects valueCents.
+ * Returns the updated asset (from the mutation payload).
  */
 export async function updateAssetValue(assetNodeId, valueCents) {
-    const cur = (await getAssets()).find((a) => a.assetId === assetNodeId);
-    if (!cur) {
-        throw new Error(`No manual asset with id "${assetNodeId}". Use list_assets to see valid ids.`);
-    }
-    const data = await rmMutation("UpdateAsset", "mutation UpdateAsset($input: UpdateAssetInput!) {\n  updateAsset(input: $input) {\n    asset {\n      id\n      name\n      type\n      includeInNetWorth\n      valueCents\n      __typename\n    }\n    __typename\n  }\n}", {
-        input: {
-            assetNodeId,
-            name: cur.name,
-            type: cur.assetType,
-            includeInNetWorth: cur.includeInNetWorth,
-            valueCents,
-        },
-    });
-    const a = data.updateAsset?.asset ?? {};
+    const today = ymd(new Date());
+    const data = await rmMutation("CreateAssetValue", "mutation CreateAssetValue($input: CreateAssetValueInput!) {\n  createAssetValue(input: $input) {\n    asset {\n      id\n      name\n      type\n      includeInNetWorth\n      valueCents\n      __typename\n    }\n    __typename\n  }\n}", { input: { assetNodeId, valueCents, date: today } });
+    const a = data.createAssetValue?.asset;
+    if (!a)
+        throw new Error(`createAssetValue returned no asset for "${assetNodeId}".`);
     return {
-        assetId: assetNodeId,
-        name: String(a.name ?? cur.name),
+        assetId: String(a.id ?? assetNodeId),
+        name: String(a.name ?? ""),
         valueCents: typeof a.valueCents === "number" ? a.valueCents : valueCents,
-        assetType: String(a.type ?? cur.assetType),
-        includeInNetWorth: Boolean(a.includeInNetWorth ?? cur.includeInNetWorth),
+        assetType: String(a.type ?? ""),
+        includeInNetWorth: Boolean(a.includeInNetWorth),
     };
 }
 /** This-month vs last-month spending, earnings, and per-category breakdown. */
