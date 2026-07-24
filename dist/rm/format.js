@@ -73,6 +73,16 @@ export function shapeAccountDetail(data) {
                 }),
             }
             : null,
+        holdings: asArr(a.holdings).map((h) => {
+            const p = asObj(h);
+            return {
+                ticker: p.tickerSymbol,
+                name: p.name,
+                quantity: p.quantity,
+                value: usd(p.valueCents),
+                type: p.type,
+            };
+        }),
         balanceHistory: asArr(a.sixMonthDailyHistory)
             .map((h) => {
             const p = asObj(h);

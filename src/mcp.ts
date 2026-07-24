@@ -68,7 +68,7 @@ export function buildServer(): McpServer {
     {
       title: "Get account detail",
       description:
-        "Detailed view of one account: current/available balance, credit limit, liability details (statement balance, minimum payment, due date, APRs), and recent daily balance history. Pass the account node id from list_accounts.",
+        "Detailed view of one account: current/available balance, credit limit, liability details (statement balance, minimum payment, due date, APRs), holdings (for investment accounts), and recent daily balance history. Pass the account node id from list_accounts.",
       inputSchema: {
         account_id: z.string().describe("The account node id (the `id` field from list_accounts)"),
       },
@@ -77,6 +77,32 @@ export function buildServer(): McpServer {
     tool(async ({ account_id }: { account_id: string }) =>
       fmt.shapeAccountDetail(await rm.getAccountDetail(account_id)),
     ),
+  );
+
+  server.registerTool(
+    "list_holdings",
+    {
+      title: "List investment holdings",
+      description:
+        "List the securities held in one investment account (401k, IRA, brokerage): ticker, name, quantity, market value, and type. Pass the account node id from list_accounts. Returns an empty list for non-investment accounts.",
+      inputSchema: {
+        account_id: z.string().describe("The account node id (the `id` field from list_accounts)"),
+      },
+      annotations: READ,
+    },
+    tool(async ({ account_id }: { account_id: string }) => {
+      const nodes: Record<string, unknown>[] = [];
+      rm.collectByType(await rm.getAccountDetail(account_id), "Holdings", nodes);
+      const holdings = nodes.map((h) => ({
+        ticker: h.tickerSymbol,
+        name: h.name,
+        quantity: h.quantity,
+        value: fmt.usd(h.valueCents as number),
+        type: h.type,
+      }));
+      const total = holdings.reduce((t, h) => t + (h.value ?? 0), 0);
+      return { count: holdings.length, totalValue: Math.round(total * 100) / 100, holdings };
+    }),
   );
 
   server.registerTool(
