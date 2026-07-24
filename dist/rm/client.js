@@ -217,6 +217,23 @@ export async function getNetWorth(useEquity = false) {
         variables: { sixMonthsAgo: w.sixMonthsAgo, useEquity, lastMonth: w.lastMonthEnd },
     });
 }
+/**
+ * READ: the user's manually-tracked "other assets" (vehicles, valuables, etc.),
+ * which RM returns inside the net-worth view as `NetWorthOther` nodes. These are
+ * the assets you add by hand, distinct from linked institution accounts.
+ */
+export async function getAssets() {
+    const data = await getNetWorth(false);
+    const nodes = [];
+    collectByType(data, "NetWorthOther", nodes);
+    return nodes.map((o) => ({
+        assetId: String(o.assetNodeId ?? ""),
+        name: String(o.name ?? ""),
+        valueCents: typeof o.valueCents === "number" ? o.valueCents : 0,
+        assetType: String(o.assetType ?? ""),
+        includeInNetWorth: Boolean(o.includeInNetWorth),
+    }));
+}
 /** This-month vs last-month spending, earnings, and per-category breakdown. */
 export async function getSpending() {
     const w = monthWindows();

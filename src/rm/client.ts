@@ -259,6 +259,32 @@ export async function getNetWorth(useEquity = false): Promise<Record<string, unk
   });
 }
 
+export interface RMAsset {
+  assetId: string; // base64 Asset node id (base64("Asset:<numeric>"))
+  name: string;
+  valueCents: number;
+  assetType: string; // e.g. "vehicle", "home", "other"
+  includeInNetWorth: boolean;
+}
+
+/**
+ * READ: the user's manually-tracked "other assets" (vehicles, valuables, etc.),
+ * which RM returns inside the net-worth view as `NetWorthOther` nodes. These are
+ * the assets you add by hand, distinct from linked institution accounts.
+ */
+export async function getAssets(): Promise<RMAsset[]> {
+  const data = await getNetWorth(false);
+  const nodes: Record<string, unknown>[] = [];
+  collectByType(data, "NetWorthOther", nodes);
+  return nodes.map((o) => ({
+    assetId: String(o.assetNodeId ?? ""),
+    name: String(o.name ?? ""),
+    valueCents: typeof o.valueCents === "number" ? o.valueCents : 0,
+    assetType: String(o.assetType ?? ""),
+    includeInNetWorth: Boolean(o.includeInNetWorth),
+  }));
+}
+
 /** This-month vs last-month spending, earnings, and per-category breakdown. */
 export async function getSpending(): Promise<Record<string, unknown>> {
   const w = monthWindows();

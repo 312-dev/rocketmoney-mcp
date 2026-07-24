@@ -62,6 +62,24 @@ export function buildServer() {
         },
         annotations: READ,
     }, tool(async ({ use_equity }) => fmt.shapeNetWorth(await rm.getNetWorth(use_equity ?? false))));
+    server.registerTool("list_assets", {
+        title: "List manual assets",
+        description: "List the user's manually-tracked assets (vehicles, valuables, etc. under 'Other Assets') with their current value and asset id. These are assets added by hand, separate from linked institution accounts. Use the returned `id` with set_asset_value to update a balance.",
+        inputSchema: {},
+        annotations: READ,
+    }, tool(async () => {
+        const assets = await rm.getAssets();
+        return {
+            count: assets.length,
+            assets: assets.map((a) => ({
+                id: a.assetId,
+                name: a.name,
+                value: fmt.usd(a.valueCents),
+                type: a.assetType,
+                includeInNetWorth: a.includeInNetWorth,
+            })),
+        };
+    }));
     server.registerTool("spending_summary", {
         title: "Spending summary",
         description: "This month's spending and earnings vs last month, plus a per-category spending breakdown (largest first). Amounts in USD.",
