@@ -285,6 +285,40 @@ export async function getAssets(): Promise<RMAsset[]> {
   }));
 }
 
+/**
+ * WRITE: set a manual asset's value (in cents). Looks up the asset's current
+ * name/type/includeInNetWorth and sends them alongside the new valueCents,
+ * mirroring the web app's proven-safe UpdateAsset payload so no field is nulled.
+ * Throws if the asset id isn't found. Returns the updated asset.
+ */
+export async function updateAssetValue(assetNodeId: string, valueCents: number): Promise<RMAsset> {
+  const cur = (await getAssets()).find((a) => a.assetId === assetNodeId);
+  if (!cur) {
+    throw new Error(`No manual asset with id "${assetNodeId}". Use list_assets to see valid ids.`);
+  }
+  const data = await rmMutation<{ updateAsset?: { asset?: Record<string, unknown> } }>(
+    "UpdateAsset",
+    "mutation UpdateAsset($input: UpdateAssetInput!) {\n  updateAsset(input: $input) {\n    asset {\n      id\n      name\n      type\n      includeInNetWorth\n      valueCents\n      __typename\n    }\n    __typename\n  }\n}",
+    {
+      input: {
+        assetNodeId,
+        name: cur.name,
+        type: cur.assetType,
+        includeInNetWorth: cur.includeInNetWorth,
+        valueCents,
+      },
+    },
+  );
+  const a = data.updateAsset?.asset ?? {};
+  return {
+    assetId: assetNodeId,
+    name: String(a.name ?? cur.name),
+    valueCents: typeof a.valueCents === "number" ? a.valueCents : valueCents,
+    assetType: String(a.type ?? cur.assetType),
+    includeInNetWorth: Boolean(a.includeInNetWorth ?? cur.includeInNetWorth),
+  };
+}
+
 /** This-month vs last-month spending, earnings, and per-category breakdown. */
 export async function getSpending(): Promise<Record<string, unknown>> {
   const w = monthWindows();

@@ -202,5 +202,24 @@ export function buildServer() {
         const updated = await rm.setTransactionCategory(transaction_id, catNodeId, apply_to_all ?? false);
         return { transaction_id, category, categoryNodeId: catNodeId, updatedCount: updated, ok: true };
     }));
+    server.registerTool("set_asset_value", {
+        title: "Set manual asset value",
+        description: "WRITES to Rocket Money: update the value/balance of a manually-tracked asset (e.g. a vehicle under 'Other Assets'). Pass the asset id from list_assets and the new value in USD dollars. Preserves the asset's name/type/net-worth setting. Returns the updated asset.",
+        inputSchema: {
+            asset_id: z.string().describe("The asset node id (the `id` from list_assets)"),
+            value: z.number().nonnegative().describe("The new asset value in USD dollars (e.g. 60000 for $60k)"),
+        },
+        annotations: WRITE,
+    }, tool(async ({ asset_id, value }) => {
+        const updated = await rm.updateAssetValue(asset_id, Math.round(value * 100));
+        return {
+            id: updated.assetId,
+            name: updated.name,
+            value: fmt.usd(updated.valueCents),
+            type: updated.assetType,
+            includeInNetWorth: updated.includeInNetWorth,
+            ok: true,
+        };
+    }));
     return server;
 }
