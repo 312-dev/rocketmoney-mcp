@@ -102,7 +102,14 @@ export function shapeAccountDetail(data: Obj) {
 function holdings(list: unknown) {
   return asArr(list).map((x) => {
     const p = asObj(x);
+    // Manual assets carry `assetNodeId`; linked accounts carry `accountNodeId`.
+    // Surfacing the id is what lets a caller act on what it just read - without
+    // it, set_asset_value has nothing to address.
+    const assetId = p.assetNodeId ? String(p.assetNodeId) : null;
+    const accountId = p.accountNodeId ? String(p.accountNodeId) : null;
     return {
+      id: assetId ?? accountId,
+      manual: assetId !== null,
       name: p.name,
       value: usd(p.valueCents ?? p.balanceCents),
       limit: usd(p.limitCents),
@@ -119,26 +126,40 @@ export function shapeNetWorth(data: Obj) {
   const cash = sum(nw.cash);
   const savings = sum(nw.savings);
   const investments = sum(nw.investments);
+  // `other` holds the hand-entered assets (the vehicle, valuables). Leaving it
+  // out understated net worth by their full value - RM's own
+  // sixMonthDailyHistory counts them, so the two numbers disagreed.
+  const other = sum(nw.other);
   const creditCardDebt = sum(nw.creditCardDebts);
   const longTermDebt = sum(nw.longTermDebts);
   const otherDebt = sum(nw.otherDebts);
-  const assets = cash + savings + investments;
+  const assets = cash + savings + investments + other;
   const debts = creditCardDebt + longTermDebt + otherDebt;
+  // These three are cents, like every other RM money field - the names just
+  // lack the usual `Cents` suffix. num() passed them through raw, so `trend`
+  // reported values 100x the `netWorth`/`totals` in the same response.
   const history = asArr(nw.sixMonthDailyHistory).map((h) => {
     const p = asObj(h);
-    return { date: p.date, netWorth: num(p.netWorth), asset: num(p.asset), debt: num(p.debt) };
+    return { date: p.date, netWorth: usd(p.netWorth), asset: usd(p.asset), debt: usd(p.debt) };
   });
   return {
     netWorth: Math.round((assets - debts) * 100) / 100,
-    totals: { assets, debts, cash, savings, investments, creditCardDebt, longTermDebt, otherDebt },
+    totals: {
+      assets, debts, cash, savings, investments, other,
+      creditCardDebt, longTermDebt, otherDebt,
+    },
     accounts: {
       cash: holdings(nw.cash),
       savings: holdings(nw.savings),
       investments: holdings(nw.investments),
+      other: holdings(nw.other),
       creditCardDebts: holdings(nw.creditCardDebts),
       longTermDebts: holdings(nw.longTermDebts),
     },
-    trend: history.slice(-30),
+    // RM returns sixMonthDailyHistory newest-first, so slice(-30) took the 30
+    // OLDEST days - six months of stale (often all-zero) rows presented as a
+    // recent trend. Take from the head instead.
+    trend: history.slice(0, 30),
   };
 }
 

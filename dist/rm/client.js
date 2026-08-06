@@ -168,6 +168,20 @@ function collectByType(obj, typename, out) {
     for (const v of Object.values(o))
         collectByType(v, typename, out);
 }
+function collectWhere(obj, match, out) {
+    if (!obj || typeof obj !== "object")
+        return;
+    if (Array.isArray(obj)) {
+        for (const el of obj)
+            collectWhere(el, match, out);
+        return;
+    }
+    const o = obj;
+    if (match(o))
+        out.push(o);
+    for (const v of Object.values(o))
+        collectWhere(v, match, out);
+}
 function findPageInfo(obj) {
     if (!obj || typeof obj !== "object")
         return null;
@@ -218,19 +232,27 @@ export async function getNetWorth(useEquity = false) {
     });
 }
 /**
- * READ: the user's manually-tracked "other assets" (vehicles, valuables, etc.),
- * which RM returns inside the net-worth view as `NetWorthOther` nodes. These are
- * the assets you add by hand, distinct from linked institution accounts.
+ * READ: the user's manually-tracked assets (vehicles, valuables, hand-entered
+ * savings), which RM returns inside the net-worth view. These are the assets you
+ * add by hand, distinct from linked institution accounts.
+ *
+ * They are NOT confined to the `other` bucket: RM files each one by its
+ * assetType, so a savings-type asset arrives as a `NetWorthCash` node sitting
+ * alongside the linked checking accounts. Filtering on `__typename` therefore
+ * silently hides them. The reliable marker is `assetNodeId` - only manual assets
+ * carry one, and linked accounts get `accountNodeId` instead.
  */
 export async function getAssets() {
     const data = await getNetWorth(false);
     const nodes = [];
-    collectByType(data, "NetWorthOther", nodes);
+    collectWhere(data, (o) => o.assetNodeId != null, nodes);
     return nodes.map((o) => ({
         assetId: String(o.assetNodeId ?? ""),
         name: String(o.name ?? ""),
         valueCents: typeof o.valueCents === "number" ? o.valueCents : 0,
-        assetType: String(o.assetType ?? ""),
+        // `assetType` only exists on NetWorthOther nodes; a manual asset filed into
+        // another bucket carries its kind in `type` ("manual") instead.
+        assetType: String(o.assetType ?? o.type ?? ""),
         includeInNetWorth: Boolean(o.includeInNetWorth),
     }));
 }
