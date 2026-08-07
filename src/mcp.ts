@@ -23,6 +23,30 @@ function tool<T>(fn: (args: T) => Promise<unknown>) {
 
 const READ = { readOnlyHint: true, openWorldHint: true } as const;
 
+/**
+ * Account node id -> "Institution Name 1234", so transaction rows name the card
+ * they hit instead of an opaque base64 id. Cached for the process lifetime: the
+ * account list changes only when a new institution is linked, and every caller
+ * falls back to the raw id on a miss.
+ */
+let accountLabelCache: Map<string, string> | null = null;
+async function accountLabels(): Promise<Map<string, string>> {
+  if (accountLabelCache) return accountLabelCache;
+  const shaped = fmt.shapeAccounts(await rm.getAccounts()) as {
+    institutions?: { institution?: unknown; accounts?: { id?: unknown; name?: unknown; mask?: unknown }[] }[];
+  };
+  const map = new Map<string, string>();
+  for (const inst of shaped.institutions ?? []) {
+    for (const a of inst.accounts ?? []) {
+      if (typeof a.id !== "string") continue;
+      const parts = [inst.institution, a.name, a.mask].filter(Boolean).map(String);
+      map.set(a.id, parts.join(" "));
+    }
+  }
+  accountLabelCache = map;
+  return map;
+}
+
 /** Build a fresh McpServer with all read-only Rocket Money tools registered. */
 export function buildServer(): McpServer {
   const server = new McpServer(
@@ -203,15 +227,20 @@ export function buildServer(): McpServer {
     {
       title: "Search transactions",
       description:
-        "Search transactions by merchant/description text and/or since a date. Both filters optional; omit query to list recent transactions. Amounts in USD; returns up to ~1200 matches.",
+        "Search transactions by merchant/description text, since a date, and/or account. All filters optional; omit everything to list recent transactions. Amounts in USD; returns up to ~1200 matches. Each row carries the account it posted to - pass account_ids to filter server-side, which is far cheaper than pulling every account and discarding.",
       inputSchema: {
         query: z.string().optional().describe("Merchant or description text, e.g. 'Amazon'"),
         since: z.string().optional().describe("Only transactions on/after this date (YYYY-MM-DD)"),
+        account_ids: z
+          .array(z.string())
+          .optional()
+          .describe("Only these accounts. Account node ids from list_accounts; omit for all accounts"),
       },
       annotations: READ,
     },
-    tool(async ({ query, since }: { query?: string; since?: string }) => {
-      const txns = await rm.searchTransactions(query ?? null, since ?? null);
+    tool(async ({ query, since, account_ids }: { query?: string; since?: string; account_ids?: string[] }) => {
+      const txns = await rm.searchTransactions(query ?? null, since ?? null, 6, account_ids ?? []);
+      const labels = txns.length ? await accountLabels() : new Map<string, string>();
       return {
         count: txns.length,
         transactions: txns.map((t) => ({
@@ -220,6 +249,7 @@ export function buildServer(): McpServer {
           amount: fmt.usd(t.amountCents),
           name: t.name,
           category: t.categoryLabel,
+          account: t.accountId ? (labels.get(t.accountId) ?? t.accountId) : null,
           note: t.note,
         })),
       };
@@ -305,7 +335,7 @@ export function buildServer(): McpServer {
     {
       title: "Set transaction category",
       description:
-        "WRITES to Rocket Money: recategorize one transaction. `category` accepts a category label (e.g. \"Groceries\"), a numeric category id, or a category node id - call list_categories first to see valid options. Set apply_to_all=true to recategorize every related transaction from the same merchant, not just this one.",
+        "WRITES to Rocket Money: recategorize one transaction. `category` accepts a category label (e.g. \"Groceries\"), a numeric category id, or a category node id - call list_categories first to see valid options. Set apply_to_all=true to also sweep the merchant's other transactions (matched by descriptor). To recategorize a specific known set of transactions, prefer set_transactions_category - it is one round trip instead of N.",
       inputSchema: {
         transaction_id: z.string().describe("The transaction node id (the `id` from search_transactions)"),
         category: z
@@ -333,6 +363,36 @@ export function buildServer(): McpServer {
         return { transaction_id, category, categoryNodeId: catNodeId, updatedCount: updated, ok: true };
       },
     ),
+  );
+
+  server.registerTool(
+    "set_transactions_category",
+    {
+      title: "Set category on many transactions",
+      description:
+        "WRITES to Rocket Money: recategorize a batch of transactions in one call. Pass the transaction node ids (the `id` from search_transactions) and a category label, numeric id, or category node id. Returns updatedCount as reported by Rocket Money - compare it against the number of ids you sent rather than trusting ok:true.",
+      inputSchema: {
+        transaction_ids: z
+          .array(z.string())
+          .min(1)
+          .describe("Transaction node ids to recategorize (the `id` values from search_transactions)"),
+        category: z
+          .string()
+          .describe("Target category: a label like 'Groceries', a numeric id, or a category node id"),
+      },
+      annotations: WRITE,
+    },
+    tool(async ({ transaction_ids, category }: { transaction_ids: string[]; category: string }) => {
+      const catNodeId = await rm.resolveCategoryNodeId(category);
+      const updated = await rm.setTransactionsCategory(transaction_ids, catNodeId);
+      return {
+        requested: transaction_ids.length,
+        updatedCount: updated,
+        category,
+        categoryNodeId: catNodeId,
+        ok: updated === transaction_ids.length,
+      };
+    }),
   );
 
   server.registerTool(

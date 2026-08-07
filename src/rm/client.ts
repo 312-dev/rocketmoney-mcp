@@ -415,16 +415,23 @@ export interface RMTransaction {
   note: string | null;
   name: string;
   categoryLabel: string | null;
+  accountId: string | null;
 }
 
 /**
  * Search transactions matching `query` (optional) on/after `gteDate`
  * (YYYY-MM-DD, optional). Paginates up to a safety cap and dedupes.
+ *
+ * `accountIds` takes Account node ids (the same base64 ids getAccounts returns);
+ * empty means every account. Without it there is no way to tell which card a
+ * charge landed on, since the merchant descriptor alone does not identify the
+ * account.
  */
 export async function searchTransactions(
   query: string | null,
   gteDate: string | null,
   maxPages = 6,
+  accountIds: string[] = [],
 ): Promise<RMTransaction[]> {
   const all: RMTransaction[] = [];
   let cursor: string | null = null;
@@ -435,7 +442,7 @@ export async function searchTransactions(
       variables: {
         query,
         order: "reverse:date",
-        accountIds: [],
+        accountIds,
         transactionCategoryIds: [],
         gteDate,
         ltDate: null,
@@ -451,6 +458,7 @@ export async function searchTransactions(
     for (const o of nodes) {
       if (typeof o.id !== "string" || typeof o.amount !== "number") continue;
       const category = o.category as { label?: string } | null | undefined;
+      const account = o.account as { id?: string } | null | undefined;
       all.push({
         nodeId: o.id,
         amountCents: o.amount,
@@ -458,6 +466,7 @@ export async function searchTransactions(
         note: (o.note as string | null) ?? null,
         name: String(o.longName ?? o.shortName ?? ""),
         categoryLabel: category?.label ?? null,
+        accountId: account?.id ?? null,
       });
     }
 
@@ -558,28 +567,51 @@ export async function setTransactionNote(nodeId: string, note: string): Promise<
 }
 
 /**
- * WRITE: set a transaction's spending category. `catNodeId` must be a
+ * WRITE: set the spending category on many transactions in one round trip.
+ * This is the mutation the web app fires when you multi-select rows, and it is
+ * the only reliable way to recategorize in bulk. Returns RM's own countUpdated.
+ */
+export async function setTransactionsCategory(
+  nodeIds: string[],
+  catNodeId: string,
+): Promise<number> {
+  if (nodeIds.length === 0) return 0;
+  const data = await rmMutation<{ setTransactionsCategory?: { countUpdated?: number } }>(
+    "SetTransactionsCategory",
+    "mutation SetTransactionsCategory($input: SetTransactionsCategoryInput!) {\n  setTransactionsCategory(input: $input) {\n    transactions {\n      id\n      category {\n        id\n        __typename\n      }\n      ignoredFrom\n      __typename\n    }\n    countUpdated\n    transactionOverrideIds\n    __typename\n  }\n}",
+    {
+      input: {
+        transactionNodeIds: nodeIds,
+        transactionCategoryNodeId: catNodeId,
+      },
+    },
+  );
+  return data.setTransactionsCategory?.countUpdated ?? 0;
+}
+
+/**
+ * WRITE: set one transaction's spending category. `catNodeId` must be a
  * TransactionCategory node id (use resolveCategoryNodeId to accept labels/ids).
- * When `applyToAll` is true, RM re-categorizes every related transaction from the
- * same merchant, not just this one.
+ *
+ * `applyToAll` sweeps the merchant's other rows by looking the merchant name up
+ * and bulk-setting the matches. It deliberately does NOT use the singular
+ * mutation's `categorizeAllRelatedTransactions` input: RM accepts that field and
+ * returns success, but only ever updates the one transaction you named, so a
+ * caller trusting it silently leaves the rest of the merchant behind.
  */
 export async function setTransactionCategory(
   nodeId: string,
   catNodeId: string,
   applyToAll = false,
 ): Promise<number> {
-  const data = await rmMutation<{ setTransactionCategory?: { updatedTransactions?: unknown[] } }>(
-    "SetTransactionCategory",
-    "mutation SetTransactionCategory($input: SetTransactionCategoryInput!) {\n  setTransactionCategory(input: $input) {\n    __typename\n    updatedTransactions {\n      id\n      __typename\n    }\n  }\n}",
-    {
-      input: {
-        transactionNodeId: nodeId,
-        transactionCategoryNodeId: catNodeId,
-        categorizeAllRelatedTransactions: applyToAll,
-      },
-    },
-  );
-  return data.setTransactionCategory?.updatedTransactions?.length ?? 0;
+  if (!applyToAll) return setTransactionsCategory([nodeId], catNodeId);
+
+  const self = (await searchTransactions(null, null, 1)).find((t) => t.nodeId === nodeId);
+  if (!self?.name) return setTransactionsCategory([nodeId], catNodeId);
+
+  const related = await searchTransactions(self.name, null, 6);
+  const ids = new Set<string>([nodeId, ...related.map((t) => t.nodeId)]);
+  return setTransactionsCategory([...ids], catNodeId);
 }
 
 export { findByType, collectByType };
