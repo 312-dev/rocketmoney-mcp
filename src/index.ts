@@ -5,7 +5,7 @@ import { renderAuthPage, submitAuth, ingestAuth, authStatus, triggerLogin, postO
 import { refreshAuthToken } from "./rm/client.js";
 import { sessionStatus } from "./rm/session.js";
 import { attemptLogin, autoLoginConfigured } from "./rm/login.js";
-import { newTransactions } from "./api.js";
+import { newTransactions, budgetSnapshot } from "./api.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -49,6 +49,9 @@ app.post("/auth/ingest", ingestAuth);
 // first; the slug route follows so a bare hit is not read as an empty slug.
 app.get("/api/transactions", newTransactions);
 app.get("/api/transactions/:slug", newTransactions);
+// Budgets, recurring merchants, upcoming bills and spending in one read, for
+// the card gate on lockbox deciding whether a new Essentials charge fits.
+app.get("/api/budget", budgetSnapshot);
 
 // ── MCP endpoint (served on rocketmoney.graysons.network via Worker) ─
 // Stateless streamable HTTP: a fresh server+transport per request, torn down on

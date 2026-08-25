@@ -151,3 +151,46 @@ export async function newTransactions(req: Request, res: Response): Promise<void
     res.status(502).json({ ok: false, error: "upstream error", detail: String(err) });
   }
 }
+
+
+/**
+ * GET /api/budget
+ *
+ * One read for a caller deciding whether a new recurring charge fits: the
+ * budgets, every recurring merchant Rocket Money knows, the next 28 days of
+ * bills, and this month's spending by category. Same shapes the MCP tools
+ * return, so a human and a script are reading the same numbers. Same bearer
+ * guard as the transactions feed, for the same unattended callers.
+ */
+export async function budgetSnapshot(req: Request, res: Response): Promise<void> {
+  if (!authorized(req)) {
+    logHit(req, "-> 401");
+    res.status(401).json({ ok: false, error: "unauthorized" });
+    return;
+  }
+  try {
+    const [budgets, recurring, upcoming, spending] = await Promise.all([
+      rm.getBudgets(),
+      rm.getRecurring(),
+      rm.getUpcoming(28),
+      rm.getSpending(),
+    ]);
+    logHit(req, "-> 200");
+    res.status(200).json({
+      ok: true,
+      as_of: new Date().toISOString(),
+      budgets: fmt.shapeBudgets(budgets),
+      recurring: fmt.shapeRecurring(recurring),
+      upcoming: fmt.shapeUpcoming(upcoming),
+      spending: fmt.shapeSpending(spending),
+    });
+  } catch (err) {
+    if (err instanceof RMAuthError) {
+      logHit(req, "-> 503 (session inactive)");
+      res.status(503).json({ ok: false, error: "rocket money session inactive", session: sessionStatus() });
+      return;
+    }
+    logHit(req, `-> 500 (${(err as Error).message})`);
+    res.status(500).json({ ok: false, error: "internal error" });
+  }
+}
