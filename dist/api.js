@@ -158,30 +158,40 @@ export async function budgetSnapshot(req, res) {
         res.status(401).json({ ok: false, error: "unauthorized" });
         return;
     }
-    try {
-        const [budgets, recurring, upcoming, spending] = await Promise.all([
-            rm.getBudgets(),
-            rm.getRecurring(),
-            rm.getUpcoming(28),
-            rm.getSpending(),
-        ]);
-        logHit(req, "-> 200");
-        res.status(200).json({
-            ok: true,
-            as_of: new Date().toISOString(),
-            budgets: fmt.shapeBudgets(budgets),
-            recurring: fmt.shapeRecurring(recurring),
-            upcoming: fmt.shapeUpcoming(upcoming),
-            spending: fmt.shapeSpending(spending),
-        });
-    }
-    catch (err) {
-        if (err instanceof RMAuthError) {
-            logHit(req, "-> 503 (session inactive)");
-            res.status(503).json({ ok: false, error: "rocket money session inactive", session: sessionStatus() });
-            return;
+    // Four independent reads. Rocket Money rotates its persisted-query hashes
+    // one at a time, so a single stale hash must cost one section, not the
+    // whole snapshot; whatever failed is named under `errors` instead.
+    const reads = {
+        budgets: () => rm.getBudgets().then(fmt.shapeBudgets),
+        recurring: () => rm.getRecurring().then(fmt.shapeRecurring),
+        upcoming: () => rm.getUpcoming(28).then(fmt.shapeUpcoming),
+        spending: () => rm.getSpending().then(fmt.shapeSpending),
+    };
+    const body = { ok: true, as_of: new Date().toISOString() };
+    const errors = {};
+    let authFailed = false;
+    await Promise.all(Object.entries(reads).map(async ([key, read]) => {
+        try {
+            body[key] = await read();
         }
-        logHit(req, `-> 500 (${err.message})`);
-        res.status(500).json({ ok: false, error: "internal error" });
+        catch (err) {
+            if (err instanceof RMAuthError)
+                authFailed = true;
+            errors[key] = err.message;
+        }
+    }));
+    if (authFailed) {
+        logHit(req, "-> 503 (session inactive)");
+        res.status(503).json({ ok: false, error: "rocket money session inactive", session: sessionStatus() });
+        return;
     }
+    if (Object.keys(errors).length === Object.keys(reads).length) {
+        logHit(req, `-> 500 (${Object.values(errors).join("; ")})`);
+        res.status(500).json({ ok: false, error: "every read failed", errors });
+        return;
+    }
+    if (Object.keys(errors).length)
+        body.errors = errors;
+    logHit(req, `-> 200${Object.keys(errors).length ? ` (partial: ${Object.keys(errors).join(",")})` : ""}`);
+    res.status(200).json(body);
 }
