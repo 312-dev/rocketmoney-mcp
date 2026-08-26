@@ -6,7 +6,9 @@ import * as fmt from "./rm/format.js";
 import { sessionStatus } from "./rm/session.js";
 import { getSchedulerConfig, runNow, setSchedulerConfig } from "./amazon/scheduler.js";
 import { syncAmazonSince } from "./amazon/sync.js";
-const AUTH_HINT = "Rocket Money session is not active. Open the auth page (rocketmoney-auth.graysons.network) and paste a fresh `tb.auth0.sid` cookie from a logged-in app.rocketmoney.com browser tab.";
+const AUTH_HINT = "Rocket Money session is not active. Open this server's /auth page and paste a fresh `tb.auth0.sid` cookie from a logged-in app.rocketmoney.com browser tab.";
+/** With ROCKETMONEY_READ_ONLY=1 the write tools are never registered, so a client cannot reach them. */
+export const READ_ONLY = /^(1|true|yes)$/i.test(process.env.ROCKETMONEY_READ_ONLY ?? "");
 /** Wrap a tool body so RMAuthError becomes a clean, actionable MCP error. */
 function tool(fn) {
     return async (args) => {
@@ -21,10 +23,14 @@ function tool(fn) {
     };
 }
 const READ = { readOnlyHint: true, openWorldHint: true };
-/** Build a fresh McpServer with all read-only Rocket Money tools registered. */
+/** Build a fresh McpServer with the Rocket Money tools registered (writes omitted under READ_ONLY). */
 export function buildServer() {
     const server = new McpServer({ name: "rocketmoney", version: "1.0.0" }, {
-        instructions: "Access to the user's Rocket Money finances: accounts and balances, transactions, spending by category, budgets, net worth, and subscriptions (all read-only, USD). The ONLY tools that write to Rocket Money are the amazon_sync_* tools: they enrich Amazon transactions by setting each one's note to the ordered item name and its spending category, matched from Amazon order-confirmation emails. amazon_sync_preview is a safe dry run; amazon_sync_apply writes; amazon_sync_enable/disable control an autonomous background sync. If a tool reports the session is inactive, the user must re-authenticate at the auth page.",
+        instructions: "Access to the user's Rocket Money finances: accounts and balances, transactions, spending by category, budgets, net worth, and subscriptions (all read-only, USD). " +
+            (READ_ONLY
+                ? "This server runs in read-only mode: no tool writes to Rocket Money."
+                : "The ONLY tools that write to Rocket Money are the amazon_sync_* tools: they enrich Amazon transactions by setting each one's note to the ordered item name and its spending category, matched from Amazon order-confirmation emails. amazon_sync_preview is a safe dry run; amazon_sync_apply writes; amazon_sync_enable/disable control an autonomous background sync.") +
+            " If a tool reports the session is inactive, the user must re-authenticate at the auth page.",
     });
     server.registerTool("session_status", {
         title: "Session status",
@@ -135,6 +141,8 @@ export function buildServer() {
         };
     }));
     // ── Amazon enrichment (the only WRITE tools) ─────────────────────
+    // amazon_sync_preview / amazon_sync_status only read, so they stay available
+    // in read-only mode; everything below the guard can change Rocket Money data.
     const WRITE = { readOnlyHint: false, openWorldHint: true };
     server.registerTool("amazon_sync_preview", {
         title: "Preview Amazon sync",
@@ -150,6 +158,14 @@ export function buildServer() {
         },
         annotations: READ,
     }, tool(async ({ since_days }) => runNow(true, since_days)));
+    server.registerTool("amazon_sync_status", {
+        title: "Amazon sync status",
+        description: "Show the autonomous Amazon-sync scheduler state (enabled, interval, lookback, last run + last run's summary) and whether the Rocket Money session is live.",
+        inputSchema: {},
+        annotations: READ,
+    }, tool(async () => ({ scheduler: getSchedulerConfig(), session: sessionStatus(), readOnly: READ_ONLY })));
+    if (READ_ONLY)
+        return server;
     server.registerTool("amazon_sync_apply", {
         title: "Apply Amazon sync",
         description: "WRITES to Rocket Money: enrich recent Amazon transactions by setting each one's note to the ordered item name and its spending category. Idempotent (skips rows already synced unchanged). Run amazon_sync_preview first to see the changes.",
@@ -167,12 +183,6 @@ export function buildServer() {
         },
         annotations: WRITE,
     }, tool(async ({ since, dry_run }) => syncAmazonSince(since, dry_run ?? false)));
-    server.registerTool("amazon_sync_status", {
-        title: "Amazon sync status",
-        description: "Show the autonomous Amazon-sync scheduler state (enabled, interval, lookback, last run + last run's summary) and whether the Rocket Money session is live.",
-        inputSchema: {},
-        annotations: READ,
-    }, tool(async () => ({ scheduler: getSchedulerConfig(), session: sessionStatus() })));
     server.registerTool("amazon_sync_enable", {
         title: "Enable autonomous Amazon sync",
         description: "Turn ON the background Amazon-sync scheduler. It then WRITES enrichment to Rocket Money every `interval_hours` (default 6) over the last `lookback_days` (default 10), whenever the session is live. Disabled by default.",

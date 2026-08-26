@@ -1,8 +1,8 @@
 import { seedSession, sessionStatus } from "./rm/session.js";
-// The paste-a-cookie page. Served on rocketmoney-auth.graysons.network, which
-// routes tunnel -> here directly (NOT through the OAuth Worker), and is gated at
-// the Cloudflare edge by the single-user Access policy. So reaching this page
-// already means the request is the account owner; we don't add our own password.
+// The paste-a-cookie page. Meant to sit behind an authenticating front door
+// (e.g. a single-user Cloudflare Access policy) rather than the MCP OAuth layer,
+// so reaching this page already means the request is the account owner; the
+// server adds no password of its own. Never expose it unauthenticated.
 function page(body) {
     return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
