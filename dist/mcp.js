@@ -4,7 +4,9 @@ import { RMAuthError } from "./rm/client.js";
 import * as rm from "./rm/client.js";
 import * as fmt from "./rm/format.js";
 import { sessionStatus } from "./rm/session.js";
-const AUTH_HINT = "Rocket Money session is not active. Open the auth page (rocketmoney-auth.graysons.network) and paste a fresh `tb.auth0.sid` cookie from a logged-in app.rocketmoney.com browser tab.";
+const AUTH_HINT = "Rocket Money session is not active. Open this server's /auth page and paste a fresh `tb.auth0.sid` cookie from a logged-in app.rocketmoney.com browser tab.";
+/** With ROCKETMONEY_READ_ONLY=1 the write tools are never registered, so a client cannot reach them. */
+export const READ_ONLY = /^(1|true|yes)$/i.test(process.env.ROCKETMONEY_READ_ONLY ?? "");
 /** Wrap a tool body so RMAuthError becomes a clean, actionable MCP error. */
 function tool(fn) {
     return async (args) => {
@@ -42,10 +44,14 @@ async function accountLabels() {
     accountLabelCache = map;
     return map;
 }
-/** Build a fresh McpServer with all read-only Rocket Money tools registered. */
+/** Build a fresh McpServer with the Rocket Money tools registered (writes omitted under READ_ONLY). */
 export function buildServer() {
     const server = new McpServer({ name: "rocketmoney", version: "1.0.0" }, {
-        instructions: "Access to the user's Rocket Money finances (USD). Read tools: accounts and balances, transactions, spending by category, budgets, net worth, recurring charges (subscriptions, get_subscription), and the category catalog (list_categories). Write tools MUTATE the account: set_transaction_note sets/clears a transaction's note; set_transaction_category recategorizes a transaction (optionally every related transaction from the same merchant); update_subscription corrects a recurring charge's name, amount, cadence or dates; delete_subscription removes one from the list. To recategorize, first call list_categories to see valid labels/ids, then pass a label like \"Groceries\" (or a category id) to set_transaction_category. Marking a subscription cancelled is not possible: Rocket Money's API has no such field for a subscription it detected from transactions. If a tool reports the session is inactive, the user must re-authenticate at the auth page.",
+        instructions: "Access to the user's Rocket Money finances (USD). Read tools: accounts and balances, transactions, spending by category, budgets, net worth, recurring charges (subscriptions, get_subscription), and the category catalog (list_categories). " +
+            (READ_ONLY
+                ? "This server runs in read-only mode: the write tools are not registered, so nothing here can change the account."
+                : "Write tools MUTATE the account: set_transaction_note sets/clears a transaction's note; set_transaction_category recategorizes a transaction (optionally every related transaction from the same merchant); update_subscription corrects a recurring charge's name, amount, cadence or dates; delete_subscription removes one from the list. To recategorize, first call list_categories to see valid labels/ids, then pass a label like \"Groceries\" (or a category id) to set_transaction_category. Marking a subscription cancelled is not possible: Rocket Money's API has no such field for a subscription it detected from transactions.") +
+            " If a tool reports the session is inactive, the user must re-authenticate at the auth page.",
     });
     server.registerTool("session_status", {
         title: "Session status",
@@ -55,10 +61,10 @@ export function buildServer() {
     }, tool(async () => {
         const local = sessionStatus();
         if (local.status !== "live")
-            return { ...local, authenticated: false, hint: AUTH_HINT };
+            return { ...local, authenticated: false, readOnly: READ_ONLY, hint: AUTH_HINT };
         // Confirm liveness against RM (also rotates the cookie).
         const viewerId = await rm.authenticationCheck();
-        return { ...local, authenticated: Boolean(viewerId) };
+        return { ...local, authenticated: Boolean(viewerId), readOnly: READ_ONLY };
     }));
     server.registerTool("list_accounts", {
         title: "List accounts",
@@ -229,6 +235,10 @@ export function buildServer() {
         };
     }));
     // ── Write tools (these MUTATE Rocket Money) ──────────────────────
+    // ROCKETMONEY_READ_ONLY=1 stops here: the write tools are never registered,
+    // so a client cannot reach them at all.
+    if (READ_ONLY)
+        return server;
     const WRITE = { readOnlyHint: false, openWorldHint: true };
     server.registerTool("set_transaction_note", {
         title: "Set transaction note",

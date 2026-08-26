@@ -1,8 +1,9 @@
 // Rocket Money MCP Sync - service worker
 //
 // Reads the rolling `tb.auth0.sid` session cookie from your logged-in Rocket
-// Money browser session and pushes it to the MCP server's /auth/ingest endpoint,
-// so the server's session stays in lockstep with your browser. It re-pushes
+// Money browser session and pushes it to YOUR OWN MCP server's /auth/ingest
+// endpoint (configured in options; nothing is pushed until it is set), so the
+// server's session stays in lockstep with your browser. It re-pushes
 // whenever the cookie rotates (chrome.cookies.onChanged) and on a periodic alarm
 // as a heartbeat / catch-up after the worker was suspended.
 
@@ -16,7 +17,7 @@ const DEBOUNCE_MS = 2500; // coalesce cookie-change bursts
 async function getConfig() {
   const c = await chrome.storage.local.get(["ingestUrl", "clientId", "clientSecret"]);
   return {
-    ingestUrl: c.ingestUrl || "https://rocketmoney-auth.graysons.network/auth/ingest",
+    ingestUrl: c.ingestUrl || "",
     clientId: c.clientId || "",
     clientSecret: c.clientSecret || "",
   };
@@ -53,6 +54,13 @@ async function push(reason) {
   pushing = true;
   try {
     const { ingestUrl, clientId, clientSecret } = await getConfig();
+    // There is deliberately no default server. The cookie jar is a live login,
+    // so it goes nowhere until the user has named their own endpoint.
+    if (!ingestUrl) {
+      setBadge("cfg", "#cf222e");
+      await setStatus({ ok: false, reason, message: "No ingest URL set - open the extension options." });
+      return;
+    }
     if (!clientId || !clientSecret) {
       setBadge("cfg", "#cf222e");
       await setStatus({ ok: false, reason, message: "Not configured - open the extension options." });

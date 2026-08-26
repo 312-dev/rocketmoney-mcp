@@ -16,11 +16,13 @@
   .ok { color: #1a7f37; } .bad { color: #cf222e; }
 </style></head><body>
 <h1>Rocket Money MCP Sync</h1>
-<p><small>The extension pushes your logged-in Rocket Money session cookie to your MCP
-server. It authenticates to the server with a Cloudflare Access <b>service token</b>.</small></p>
+<p><small>The extension pushes your logged-in Rocket Money session cookie to <b>your own</b>
+MCP server. That cookie is a live login to your finances: only point this at a server you
+run and control. Nothing is sent until an ingest URL is set. It authenticates to the server
+with a Cloudflare Access <b>service token</b>.</small></p>
 
-<label for="ingestUrl">Ingest URL</label>
-<input id="ingestUrl" placeholder="https://rocketmoney-auth.graysons.network/auth/ingest">
+<label for="ingestUrl">Ingest URL (your server)</label>
+<input id="ingestUrl" placeholder="https://your-server.example.com/auth/ingest">
 
 <label for="clientId">CF-Access-Client-Id</label>
 <input id="clientId" placeholder="xxxx…access">

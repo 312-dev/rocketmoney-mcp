@@ -1,13 +1,24 @@
 # rocketmoney-mcp
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server for
+A self-hosted [Model Context Protocol](https://modelcontextprotocol.io) server for
 [Rocket Money](https://www.rocketmoney.com). It lets an MCP client (Claude Desktop,
 claude.ai, etc.) browse your accounts, transactions, spending, budgets, net worth,
 and subscriptions so you can *talk to an assistant about your finances* - and make
 targeted edits (transaction notes and categories, recurring-charge corrections).
 
 Reads are annotated `readOnlyHint`; the mutating tools are marked `readOnlyHint: false`,
-and `delete_subscription` additionally carries `destructiveHint`.
+and `delete_subscription` additionally carries `destructiveHint`. Start the server with
+`ROCKETMONEY_READ_ONLY=1` and the write tools are never registered at all, so a client
+cannot reach them.
+
+## Security model, in one paragraph
+
+Your Rocket Money session cookie is a live login to your finances. This server
+holds it on disk and sends it only to Rocket Money's API, so **run the server
+yourself, on a machine you control**, and put its `/auth` and `/mcp` endpoints
+behind authentication. There is no hosted instance: nothing in this repo points
+at a server the author operates, and the Chrome extension refuses to send the
+cookie anywhere until you enter your own server's URL.
 
 ## Tools
 
@@ -19,6 +30,8 @@ and `delete_subscription` additionally carries `destructiveHint`.
 | `list_accounts` | Every linked institution + account with current balance |
 | `get_account` | One account's detail: balances, credit limit, liability/APRs, balance history |
 | `net_worth` | Net worth split into cash / savings / investments / debts, with trend |
+| `list_holdings` | Investment holdings across the linked brokerage accounts |
+| `list_assets` | Manually-tracked assets and their current values |
 | `spending_summary` | This month vs last month spend + earnings, by-category breakdown |
 | `budgets` | Earnings and per-category spend across the last four months |
 | `subscriptions` | Every recurring charge, active and inactive, with amount, cadence, account and last/next charge |
@@ -28,12 +41,13 @@ and `delete_subscription` additionally carries `destructiveHint`.
 | `category_transactions` | This month's transactions within one category |
 | `list_categories` | The full category catalog (default + custom) with labels + node ids |
 
-### Write
+### Write (absent under `ROCKETMONEY_READ_ONLY=1`)
 
 | Tool | What it does |
 | --- | --- |
 | `set_transaction_note` | Set (or clear) one transaction's free-text note |
 | `set_transaction_category` | Recategorize one transaction (accepts a category label, numeric id, or node id); optionally applies to all related transactions from the same merchant |
+| `set_transactions_category` | Recategorize a list of transactions in one call |
 | `set_asset_value` | Set a manually-tracked asset's value |
 | `update_subscription` | Correct a recurring charge's name, amount, cadence or dates |
 | `mark_subscription_active` | Tell Rocket Money a subscription it wrote off is still being charged |
@@ -79,7 +93,8 @@ as tools.
 
 Rocket Money has no third-party OAuth, so this server reuses your own web session.
 You grab the `tb.auth0.sid` cookie from a logged-in `app.rocketmoney.com` browser tab
-and paste it into the server's `/auth` page. The server keeps a **rotating cookie jar**
+and paste it into the server's `/auth` page (or let the [Chrome extension](extension/)
+push it to your server automatically). The server keeps a **rotating cookie jar**
 (Rocket Money re-issues the cookie on every response, ~3h48m rolling TTL) persisted to
 disk, and runs a keepalive loop. There is no offline refresh token, so when the session
 eventually expires you re-paste a fresh cookie.
@@ -94,6 +109,7 @@ Money's own API.
 | `POST /mcp` | MCP streamable-HTTP transport (stateless) |
 | `GET /auth` | Paste-a-cookie session page |
 | `POST /auth/submit` | Session intake |
+| `POST /auth/ingest` | Session intake for the Chrome extension |
 | `GET /healthz` | Health check |
 
 ## Running locally
@@ -111,13 +127,14 @@ ROCKETMONEY_STATE_DIR=./.state PORT=8080 node dist/index.js
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP port |
 | `ROCKETMONEY_STATE_DIR` | `/data/rocketmoney` | Where the rotating session is persisted |
+| `ROCKETMONEY_READ_ONLY` | unset | `1` to leave the write tools unregistered |
 | `ROCKETMONEY_KEEPALIVE_MS` | `7200000` | Keepalive interval (2h) |
 | `ROCKETMONEY_WEB_CLIENT_VERSION` | captured default | `x-truebill-web-client-version` header |
 
 ## Deployment
 
 Designed to run behind an authenticating gateway (e.g. a Cloudflare Access / OAuth
-front door) so the `/mcp` and `/auth` endpoints are never exposed unauthenticated —
+front door) so the `/mcp` and `/auth` endpoints are never exposed unauthenticated -
 the server itself holds a live financial session and must not be publicly reachable.
 
 ## Notes

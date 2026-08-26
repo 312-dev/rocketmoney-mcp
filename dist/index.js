@@ -14,7 +14,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.text({ type: ["text/plain"], limit: "64kb" }));
 // ── Health ─────────────────────────────────────────────────────────
 app.get("/healthz", (_req, res) => res.status(200).send("ok"));
-// ── Browser auth page (served on rocketmoney-auth.graysons.network) ─
+// ── Browser auth page ─────────────────────────────────────────────
 app.get("/", renderAuthPage);
 app.get("/auth", renderAuthPage);
 app.post("/auth/submit", submitAuth);
@@ -47,7 +47,7 @@ app.get("/api/transactions/:slug", newTransactions);
 // Budgets, recurring merchants, upcoming bills and spending in one read, for
 // the card gate on lockbox deciding whether a new Essentials charge fits.
 app.get("/api/budget", budgetSnapshot);
-// ── MCP endpoint (served on rocketmoney.graysons.network via Worker) ─
+// ── MCP endpoint ──────────────────────────────────────────────────
 // Stateless streamable HTTP: a fresh server+transport per request, torn down on
 // socket close, so the process holds no per-connection state and Fly can recycle
 // it freely. The rotating RM cookie lives on the volume, not in the transport.

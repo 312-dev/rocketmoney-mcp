@@ -104,7 +104,7 @@ export async function newTransactions(req: Request, res: Response): Promise<void
       ok: false,
       error: "rocketmoney session not active",
       session: session.status,
-      hint: "Re-auth at https://rocketmoney-auth.graysons.network/auth",
+      hint: "Re-auth at this server's /auth page",
     });
     return;
   }
@@ -143,7 +143,7 @@ export async function newTransactions(req: Request, res: Response): Promise<void
         ok: false,
         error: "rocketmoney session rejected",
         detail: err.message,
-        hint: "Re-auth at https://rocketmoney-auth.graysons.network/auth",
+        hint: "Re-auth at this server's /auth page",
       });
       return;
     }
