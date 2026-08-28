@@ -148,7 +148,8 @@ export async function newTransactions(req, res) {
  *
  * One read for a caller deciding whether a new recurring charge fits: the
  * budgets, every recurring merchant Rocket Money knows, the next 28 days of
- * bills, and this month's spending by category. Same shapes the MCP tools
+ * bills, this month's spending by category, and the manually-tracked assets
+ * (the Marcus balances that marcus-rm-sync mirrors in hourly). Same shapes the MCP tools
  * return, so a human and a script are reading the same numbers. Same bearer
  * guard as the transactions feed, for the same unattended callers.
  */
@@ -158,7 +159,7 @@ export async function budgetSnapshot(req, res) {
         res.status(401).json({ ok: false, error: "unauthorized" });
         return;
     }
-    // Four independent reads. Rocket Money rotates its persisted-query hashes
+    // Five independent reads. Rocket Money rotates its persisted-query hashes
     // one at a time, so a single stale hash must cost one section, not the
     // whole snapshot; whatever failed is named under `errors` instead.
     const reads = {
@@ -166,6 +167,7 @@ export async function budgetSnapshot(req, res) {
         recurring: () => rm.getRecurring().then(fmt.shapeRecurring),
         upcoming: () => rm.getUpcoming(28).then(fmt.shapeUpcoming),
         spending: () => rm.getSpending().then(fmt.shapeSpending),
+        assets: () => rm.getAssets().then((xs) => xs.map((a) => ({ name: a.name, value: Math.round(a.valueCents) / 100, type: a.assetType }))),
     };
     const body = { ok: true, as_of: new Date().toISOString() };
     const errors = {};
