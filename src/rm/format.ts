@@ -15,10 +15,10 @@ export function usd(cents: unknown): number | null {
   return Math.round(cents) / 100;
 }
 
-/** Some RM fields are already dollars (displayedBalance); pass through as number. */
-function num(v: unknown): number | null {
-  return typeof v === "number" ? v : null;
-}
+// Every RM money field is integer cents, including the ones whose names lack the
+// usual `Cents` suffix (displayedBalance, currentBalance, available_balance,
+// credit_limit, and netWorth/asset/debt on the history rows). Passing one through
+// raw reports it 100x, so route them all through usd().
 
 // ── accounts (AccountDetailAccountListPage) ────────────────────────
 
@@ -77,7 +77,7 @@ export function shapeAccounts(data: Obj) {
         name: a.name ?? a.defaultName,
         type: a.customType,
         mask: a.number,
-        balance: num(a.displayedBalance),
+        balance: usd(a.displayedBalance),
         enabled: a.enabled,
       });
     }
@@ -96,10 +96,10 @@ export function shapeAccountDetail(data: Obj) {
     category: a.category,
     institution: asObj(a.institution).name,
     mask: a.number,
-    currentBalance: num(a.currentBalance),
-    availableBalance: num(a.available_balance),
-    displayedBalance: num(a.displayedBalance),
-    creditLimit: num(a.credit_limit),
+    currentBalance: usd(a.currentBalance),
+    availableBalance: usd(a.available_balance),
+    displayedBalance: usd(a.displayedBalance),
+    creditLimit: usd(a.credit_limit),
     firstSyncDate: a.firstSyncDate,
     liability: liab.__typename
       ? {
@@ -175,9 +175,8 @@ export function shapeNetWorth(data: Obj) {
   const otherDebt = sum(nw.otherDebts);
   const assets = cash + savings + investments + other;
   const debts = creditCardDebt + longTermDebt + otherDebt;
-  // These three are cents, like every other RM money field - the names just
-  // lack the usual `Cents` suffix. num() passed them through raw, so `trend`
-  // reported values 100x the `netWorth`/`totals` in the same response.
+  // These three are cents too, despite the missing `Cents` suffix; before that was
+  // spotted `trend` reported values 100x the `netWorth`/`totals` beside it.
   const history = asArr(nw.sixMonthDailyHistory).map((h) => {
     const p = asObj(h);
     return { date: p.date, netWorth: usd(p.netWorth), asset: usd(p.asset), debt: usd(p.debt) };

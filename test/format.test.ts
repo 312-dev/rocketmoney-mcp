@@ -40,7 +40,7 @@ test("shapeAccounts regroups the per-type buckets under their institution", () =
               defaultName: "CHK",
               customType: "checking",
               number: "1234",
-              displayedBalance: 4200.5,
+              displayedBalance: 420050,
               enabled: true,
               masterAccount: masterChase,
             },
@@ -55,7 +55,7 @@ test("shapeAccounts regroups the per-type buckets under their institution", () =
               name: "Sapphire",
               customType: "credit",
               number: "5678",
-              displayedBalance: -310,
+              displayedBalance: -31000,
               enabled: true,
               masterAccount: masterChase,
             },
@@ -69,7 +69,7 @@ test("shapeAccounts regroups the per-type buckets under their institution", () =
   assert.equal(out.institutions[0].status, "connected");
   assert.equal(out.institutions[0].accounts.length, 2);
   assert.equal(out.institutions[0].accounts[0].name, "Checking");
-  assert.equal(out.institutions[0].accounts[0].balance, 4200.5);
+  assert.equal(out.institutions[0].accounts[0].balance, 4200.5); // 420050 cents
   assert.equal(out.institutions[0].accounts[0].mask, "1234");
   assert.equal(out.institutions[0].accounts[1].type, "credit");
 });
@@ -206,8 +206,10 @@ test("shapeAccountDetail surfaces liability APRs and converts cents", () => {
       category: "credit",
       institution: { name: "Chase" },
       number: "9999",
-      currentBalance: 1200,
-      credit_limit: 10000,
+      currentBalance: 120000,
+      available_balance: 880000,
+      displayedBalance: 120000,
+      credit_limit: 1000000,
       liabilityDetails: {
         __typename: "LiabilityDetails",
         remainingStatementBalanceCents: 120000,
@@ -221,6 +223,13 @@ test("shapeAccountDetail surfaces liability APRs and converts cents", () => {
   assert.equal(out.liability?.minimumPayment, 35);
   assert.equal(out.liability?.aprs[0].percentage, 24.99);
   assert.equal(out.balanceHistory[0].balance, 1200);
+  // The balances carry no `Cents` suffix but are cents all the same. The tell is
+  // inside one response: a same-day history row and currentBalance must agree.
+  assert.equal(out.currentBalance, 1200);
+  assert.equal(out.currentBalance, out.balanceHistory[0].balance);
+  assert.equal(out.availableBalance, 8800);
+  assert.equal(out.displayedBalance, 1200);
+  assert.equal(out.creditLimit, 10000);
 });
 
 test("shapers never throw on empty/garbage input", () => {
