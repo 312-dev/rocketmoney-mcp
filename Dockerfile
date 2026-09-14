@@ -1,4 +1,5 @@
-# Read-only Rocket Money MCP server.
+# Rocket Money MCP server. Set ROCKETMONEY_READ_ONLY=1 to leave the write tools
+# unregistered.
 # Usable standalone (own Fly app) OR built as a submodule inside mcp-gateway.
 # ---- build ----
 FROM node:22-slim AS build
