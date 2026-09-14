@@ -248,26 +248,167 @@ export function shapeBudgets(data: Obj) {
 }
 
 // ── recurring / subscriptions (RecurringPage) ──────────────────────
-export function shapeRecurring(data: Obj) {
+
+// `frequency` is the number of charges per YEAR, not an interval in months, and
+// getting that backwards inverts annual and monthly. Read off the 2026-09-13
+// capture of 50 recurring nodes: 1 is annual (1Password, charged 2026-08-15,
+// next 2027-08-15), 2 is semi-annual (AAA Insurance, charged 2026-04-14, next
+// 2026-10-14), and 12 is monthly, which covers 46 of the 50. The other entries
+// below follow from the same charges-per-year arithmetic but were not in that
+// capture, so an unlisted value falls through to "N times a year" rather than
+// being guessed at.
+const CADENCE: Record<number, string> = {
+  1: "annual",
+  2: "semi-annual",
+  3: "every 4 months",
+  4: "quarterly",
+  6: "every 2 months",
+  12: "monthly",
+  24: "twice a month",
+  26: "every 2 weeks",
+  52: "weekly",
+  365: "daily",
+};
+
+/**
+ * Human cadence for a `frequency`. A null frequency means Rocket Money has not
+ * settled on one - CloudFlare and a card membership fee both carry it, and both
+ * have no nextCharge at all - so it reads as "irregular". Never zero, and never
+ * silently monthly.
+ */
+export function cadence(frequency: unknown): string {
+  if (typeof frequency !== "number" || !Number.isFinite(frequency)) return "irregular";
+  return CADENCE[frequency] ?? `${frequency} times a year`;
+}
+
+/** "Bluevine 312.dev LLC Checking 0322" for the account a charge lands on. */
+function accountLabel(account: Obj): string | null {
+  const parts = [asObj(account.institution).short_name, account.name, account.number]
+    .filter(Boolean)
+    .map(String);
+  return parts.length ? parts.join(" ") : null;
+}
+
+/**
+ * One recurring charge, flattened.
+ *
+ * Three fields carry an amount and they mean different things. `amount` on the
+ * node is a value someone pinned by hand and is null while RM is still inferring
+ * the charge from transactions (48 of 50 nodes in the 2026-09-13 capture);
+ * `nextCharge.chargeAmount` is RM's own estimate; `lastTransaction.amount` is
+ * what actually posted. `amount` is the first of those that is set, and
+ * `amountSource` says which one it came from, so a caller correcting a stale
+ * figure can see whether it was pinned or merely predicted.
+ */
+function shapeSubscriptionNode(n: Obj) {
+  const service = asObj(n.service);
+  const next = asObj(n.nextCharge);
+  const last = asObj(n.lastTransaction);
+  const pinned = usd(n.amount);
+  const estimated = usd(next.chargeAmount);
+  const lastAmount = usd(last.amount);
+  const [amount, amountSource] =
+    pinned !== null
+      ? [pinned, "pinned"]
+      : estimated !== null
+        ? [estimated, "estimated"]
+        : [lastAmount, lastAmount === null ? "unknown" : "lastCharge"];
+  return {
+    id: n.id,
+    name: n.custom_name ?? service.name,
+    service: service.name,
+    active: n.active,
+    cadence: cadence(n.frequency),
+    frequency: n.frequency,
+    amount,
+    amountSource,
+    yearlyCost: typeof n.frequency === "number" && amount !== null
+      ? Math.round(amount * n.frequency * 100) / 100
+      : null,
+    category: asObj(n.transactionCategory).label,
+    serviceType: n.service_type,
+    manual: n.manual,
+    isIncome: n.isIncome,
+    startDate: n.start_date,
+    endDate: n.end_date,
+    nextBillDate: n.expected_next_bill_date,
+    nextChargeEstimate: estimated,
+    estimateFluctuates: next.chargeAmountIsEstimate,
+    lastCharge: last.date
+      ? { date: last.date, amount: lastAmount, account: accountLabel(asObj(last.account)) }
+      : null,
+    // Rocket Money's own concierge cancellation offer. Read-only here: knowing
+    // which ones RM will cancel for you is useful, filing the request is not
+    // something a tool call should be able to do by itself.
+    canSubmitCancellationRequest: n.canSubmitCancellationRequest,
+  };
+}
+
+/**
+ * Every recurring charge Rocket Money tracks, active and inactive alike.
+ *
+ * Inactive ones are kept and flagged rather than dropped: a subscription still
+ * listed that last charged over a year ago is exactly what a list audit is
+ * looking for, and filtering it out is what let the hand-kept record drift.
+ * `activeOnly` exists for /api/budget, which asks a narrower question - what is
+ * still being charged - and would otherwise get years of dead rows.
+ */
+export function shapeRecurring(data: Obj, opts: { activeOnly?: boolean } = {}) {
   const edges = asArr(asObj(asObj(asObj(data).viewer).subscriptions).edges);
-  const subs = edges
-    .map((e) => {
-      const n = asObj(asObj(e).node);
-      const next = asObj(n.nextCharge);
-      return {
-        name: n.custom_name ?? asObj(n.service).name,
-        service: asObj(n.service).name,
-        active: n.active,
-        isIncome: n.isIncome,
-        category: asObj(n.transactionCategory).label,
-        nextBillDate: n.expected_next_bill_date,
-        nextChargeEstimate: usd(next.chargeAmount),
-        estimateFluctuates: next.chargeAmountIsEstimate,
-      };
-    })
-    .filter((s) => s.active !== false)
-    .sort((a, b) => String(a.nextBillDate ?? "").localeCompare(String(b.nextBillDate ?? "")));
-  return { count: subs.length, subscriptions: subs };
+  const all = edges.map((e) => shapeSubscriptionNode(asObj(asObj(e).node)));
+  const subs = (opts.activeOnly ? all.filter((s) => s.active !== false) : all).sort((a, b) => {
+    // Active first, then soonest bill; undated rows sort last within their group
+    // instead of leading, which is what an empty string would have done.
+    if (a.active !== b.active) return a.active === false ? 1 : -1;
+    const ad = String(a.nextBillDate ?? "9999-12-31");
+    const bd = String(b.nextBillDate ?? "9999-12-31");
+    return ad.localeCompare(bd);
+  });
+  return {
+    count: subs.length,
+    activeCount: subs.filter((s) => s.active !== false).length,
+    inactiveCount: subs.filter((s) => s.active === false).length,
+    subscriptions: subs,
+  };
+}
+
+// ── one subscription (SubscriptionDetailPage) ──────────────────────
+
+/**
+ * One recurring charge in full. Everything the list row carries, plus the charge
+ * history that says whether the cadence on file is the one the merchant is
+ * actually billing: RM's own yearly cost, a 12-month by-month total, and the
+ * individual transactions.
+ */
+export function shapeSubscriptionDetail(data: Obj) {
+  const n = asObj(data.node);
+  const txns = asArr(asObj(n.transactions).edges).map((e) => {
+    const t = asObj(asObj(e).node);
+    return {
+      id: t.id,
+      date: t.date,
+      amount: usd(t.amount),
+      name: t.longName ?? t.shortName,
+      pending: t.pending,
+      account: accountLabel(asObj(t.account)),
+    };
+  });
+  return {
+    ...shapeSubscriptionNode(n),
+    // RM's own annualized figure, which is worth keeping beside our computed
+    // yearlyCost: the two disagreeing means the cadence or the amount is wrong.
+    rocketMoneyYearlyCost: usd(n.yearlyCost),
+    transactionCount: n.transaction_count,
+    monthlyTotals: asArr(n.monthlyTransactionsBarChartData).map((b) => {
+      const p = asObj(b);
+      return { month: p.date, amount: usd(p.amountCents) };
+    }),
+    relatedSubscriptions: asArr(n.relatedSubscriptions).map((r) => {
+      const p = asObj(r);
+      return { id: p.id, name: p.custom_name ?? asObj(p.service).name };
+    }),
+    transactions: txns,
+  };
 }
 
 // ── upcoming charges (RecurringUpcomingPage) ───────────────────────

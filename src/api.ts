@@ -174,7 +174,10 @@ export async function budgetSnapshot(req: Request, res: Response): Promise<void>
   // whole snapshot; whatever failed is named under `errors` instead.
   const reads = {
     budgets: () => rm.getBudgets().then(fmt.shapeBudgets),
-    recurring: () => rm.getRecurring().then(fmt.shapeRecurring),
+    // activeOnly: this snapshot answers "does another charge fit", so the rows
+    // that stopped charging are noise here. The subscriptions MCP tool keeps
+    // them, because auditing the list is the opposite question.
+    recurring: () => rm.getRecurring().then((d) => fmt.shapeRecurring(d, { activeOnly: true })),
     upcoming: () => rm.getUpcoming(28).then(fmt.shapeUpcoming),
     spending: () => rm.getSpending().then(fmt.shapeSpending),
     assets: () =>

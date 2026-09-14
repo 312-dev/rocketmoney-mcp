@@ -14,6 +14,8 @@ const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/
 // matches, and copy extensions.persistedQuery.sha256Hash. Re-captured 2026-09-13:
 // AccountDetailAccountListPage, which replaces the retired SettingsAccountsPage
 // (RM no longer answers that operation at all), and AccountDetailPage.
+// SubscriptionDetailPage added 2026-09-13 from recurring.har; RecurringPage's
+// hash was unchanged in that same capture.
 const PERSISTED = {
     AuthenticationCheck: "5fe578b1917c4601cb63948f580ad3bdadded0fefa985fdd2fe2d1b913cce2d0",
     RefreshAuthToken: "a86bd0f5e3fbc3673d1215b894362c5cd28ce060a7bb326cc9fd37b06bdd9fbb",
@@ -23,6 +25,7 @@ const PERSISTED = {
     SpendingPage: "26e04b9b4bcf2033891037bda8b67e43afc96684f0d734883fa1af75776f14fa",
     Budgets: "f55267f5c1dacf4bfa2c92893506f771f49e3ddc04d34fa14d21d0ffeea4dfbe",
     RecurringPage: "1c6519edc695c49825a35112df49ffc275bec318736e364c5991dfef6a29430f",
+    SubscriptionDetailPage: "9556941e4ff9bdc23d43801774a45e8dc01b67b547aab774abcd9815bb5b0f3c",
     RecurringUpcomingPage: "f1dd34f01b69dd0367a8b20a07b8b45977ab6d1ce0d31919b1b4143e5ba205bc",
     TransactionCategoryPage: "1edf87cac5ca2a6428aeea4e35ae0521d0707f1e6e1fba6715ddc1d2a634fddf",
     TransactionsPageTransactionTable: "5bc74a0e8d2c33efe103eeb87d6ec09d9b57fb34795597ef2e3f7d892d76a056",
@@ -41,6 +44,8 @@ const CAPTURE_PAGE = {
     AccountDetailAccountListPage: "https://app.rocketmoney.com/account",
     AccountDetailPage: "https://app.rocketmoney.com/account (then click an account)",
     NetWorthQuery: "https://app.rocketmoney.com/net-worth",
+    RecurringPage: "https://app.rocketmoney.com/recurring",
+    SubscriptionDetailPage: "https://app.rocketmoney.com/recurring (then click a subscription)",
 };
 /** Thrown when the session is no longer authenticated (cookie expired/revoked). */
 export class RMAuthError extends Error {
@@ -342,6 +347,118 @@ export async function getRecurring() {
         operationName: "RecurringPage",
         variables: { transactionHistoryGteDate: w.sixMonthsAgo },
     });
+}
+/**
+ * One recurring charge in full: everything the list carries plus its yearly
+ * cost, transaction count, a 12-month bar chart and its own transaction list.
+ * `startDate`/`endDate` bound the transaction list; RM's own client sends null
+ * for both and gets the default window, so null is the normal call.
+ */
+export async function getSubscriptionDetail(subscriptionNodeId, startDate = null, endDate = null) {
+    return rmGraphQL({
+        operationName: "SubscriptionDetailPage",
+        variables: { id: subscriptionNodeId, startDate, endDate },
+    });
+}
+/** The five ServiceType enum members RM accepts on UpdateSubscriptionInput. */
+export const SERVICE_TYPES = ["subscription", "bill", "utility", "bundled", "unknown"];
+/**
+ * Merge a caller's edits over a subscription node into an UpdateSubscriptionInput.
+ *
+ * The mutation is a whole-object write, and `service_name` is `String!`, so a
+ * caller changing only the amount still has to resend the name. Everything the
+ * caller did not touch therefore comes from `node`, which must be a freshly read
+ * subscription rather than a remembered one.
+ *
+ * Fields still null on the node are omitted rather than sent as null. That
+ * matters most for `amount`: RM leaves it null while it is inferring the charge
+ * from transaction history, and writing a value pins it (observed 2026-09-13,
+ * where one edit turned a null `amount` into 4788 with no other change). Sending
+ * a null we invented would be a silent edit of its own.
+ */
+export function buildSubscriptionUpdateInput(node, edit = {}) {
+    const service = (node.service ?? {});
+    const name = edit.name ?? node.custom_name ?? service.name;
+    if (typeof name !== "string" || !name) {
+        throw new Error("Subscription has no name and none was supplied; service_name is required.");
+    }
+    const input = { id: node.id, service_name: name };
+    const put = (key, value) => {
+        if (value !== null && value !== undefined)
+            input[key] = value;
+    };
+    put("service_id", service._id);
+    put("amount", edit.amountCents ?? node.amount);
+    put("frequency", edit.frequency ?? node.frequency);
+    put("start_date", edit.startDate ?? node.start_date);
+    put("end_date", edit.endDate ?? node.end_date);
+    put("next_expected_date", edit.nextExpectedDate ?? node.expected_next_bill_date);
+    put("service_type", edit.serviceType ?? node.service_type);
+    return input;
+}
+const UPDATE_SUBSCRIPTION = `mutation UpdateSubscription($input: UpdateSubscriptionInput!) {
+  updateSubscription(input: $input) {
+    subscription {
+      __typename
+      id
+      amount
+      frequency
+      custom_name
+      start_date
+      end_date
+      expected_next_bill_date
+      service_type
+      custom_service_type
+      service {
+        __typename
+        id
+      }
+    }
+    __typename
+  }
+}`;
+/**
+ * WRITE: correct a recurring charge's name, amount, cadence or dates.
+ *
+ * Reads the subscription first and merges, because the mutation replaces the
+ * whole object. Returns the mutation's own payload so the caller can compare
+ * what RM saved against what it asked for.
+ *
+ * `active` is NOT reachable here: UpdateSubscriptionInput accepts only id,
+ * service_name, service_id, amount, frequency, start_date, end_date,
+ * next_expected_date and service_type (established 2026-09-13 by probing the
+ * schema's validation errors, introspection being disabled).
+ */
+export async function updateSubscription(subscriptionNodeId, edit) {
+    const detail = await getSubscriptionDetail(subscriptionNodeId);
+    const node = (detail.node ?? null);
+    if (!node?.id)
+        throw new Error(`No subscription found for id "${subscriptionNodeId}".`);
+    const input = buildSubscriptionUpdateInput(node, edit);
+    const data = await rmMutation("UpdateSubscription", UPDATE_SUBSCRIPTION, { input });
+    const saved = data.updateSubscription?.subscription;
+    if (!saved)
+        throw new Error(`updateSubscription returned no subscription for "${subscriptionNodeId}".`);
+    return saved;
+}
+/**
+ * WRITE: tell Rocket Money a subscription it had written off is still live.
+ * This is the one direction `active` moves through the API: there is a
+ * `deactivateManualSubscription` for hand-added ones, but nothing that
+ * deactivates a subscription RM detected from transactions.
+ */
+export async function markSubscriptionActive(subscriptionNodeId) {
+    const data = await rmMutation("MarkSubscriptionActive", "mutation MarkSubscriptionActive($input: MarkSubscriptionActiveInput!) {\n  markSubscriptionActive(input: $input) {\n    subscription {\n      __typename\n      id\n      active\n    }\n    __typename\n  }\n}", { input: { subscriptionId: subscriptionNodeId } });
+    return data.markSubscriptionActive?.subscription?.active ?? false;
+}
+/**
+ * WRITE: drop a recurring charge from Rocket Money's list entirely. For rows RM
+ * detected wrongly, or duplicates of a subscription already tracked. This is not
+ * a cancellation: the merchant keeps charging, RM just stops listing it.
+ */
+export async function deleteSubscription(subscriptionNodeId) {
+    const data = await rmMutation("DeleteSubscription", "mutation DeleteSubscription($input: DeleteSubscriptionInput!) {\n  deleteSubscription(input: $input) {\n    __typename\n  }\n}", { input: { subscriptionId: subscriptionNodeId } });
+    return Boolean(data.deleteSubscription);
 }
 /** Upcoming bill/subscription charges in the next `days` days (default 28). */
 export async function getUpcoming(days = 28) {
