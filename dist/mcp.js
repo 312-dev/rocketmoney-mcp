@@ -4,8 +4,6 @@ import { RMAuthError } from "./rm/client.js";
 import * as rm from "./rm/client.js";
 import * as fmt from "./rm/format.js";
 import { sessionStatus } from "./rm/session.js";
-import { getSchedulerConfig, runNow, setSchedulerConfig } from "./amazon/scheduler.js";
-import { syncAmazonSince } from "./amazon/sync.js";
 const AUTH_HINT = "Rocket Money session is not active. Open this server's /auth page and paste a fresh `tb.auth0.sid` cookie from a logged-in app.rocketmoney.com browser tab.";
 /** With ROCKETMONEY_READ_ONLY=1 the write tools are never registered, so a client cannot reach them. */
 export const READ_ONLY = /^(1|true|yes)$/i.test(process.env.ROCKETMONEY_READ_ONLY ?? "");
@@ -23,13 +21,36 @@ function tool(fn) {
     };
 }
 const READ = { readOnlyHint: true, openWorldHint: true };
+/**
+ * Account node id -> "Institution Name 1234", so transaction rows name the card
+ * they hit instead of an opaque base64 id. Cached for the process lifetime: the
+ * account list changes only when a new institution is linked, and every caller
+ * falls back to the raw id on a miss.
+ */
+let accountLabelCache = null;
+async function accountLabels() {
+    if (accountLabelCache)
+        return accountLabelCache;
+    const shaped = fmt.shapeAccounts(await rm.getAccounts());
+    const map = new Map();
+    for (const inst of shaped.institutions ?? []) {
+        for (const a of inst.accounts ?? []) {
+            if (typeof a.id !== "string")
+                continue;
+            const parts = [inst.institution, a.name, a.mask].filter(Boolean).map(String);
+            map.set(a.id, parts.join(" "));
+        }
+    }
+    accountLabelCache = map;
+    return map;
+}
 /** Build a fresh McpServer with the Rocket Money tools registered (writes omitted under READ_ONLY). */
 export function buildServer() {
     const server = new McpServer({ name: "rocketmoney", version: "1.0.0" }, {
-        instructions: "Access to the user's Rocket Money finances: accounts and balances, transactions, spending by category, budgets, net worth, and subscriptions (all read-only, USD). " +
+        instructions: "Access to the user's Rocket Money finances (USD). Read tools: accounts and balances, transactions, spending by category, budgets, net worth, recurring charges (subscriptions, get_subscription), and the category catalog (list_categories). " +
             (READ_ONLY
-                ? "This server runs in read-only mode: no tool writes to Rocket Money."
-                : "The ONLY tools that write to Rocket Money are the amazon_sync_* tools: they enrich Amazon transactions by setting each one's note to the ordered item name and its spending category, matched from Amazon order-confirmation emails. amazon_sync_preview is a safe dry run; amazon_sync_apply writes; amazon_sync_enable/disable control an autonomous background sync.") +
+                ? "This server runs in read-only mode: the write tools are not registered, so nothing here can change the account."
+                : "Write tools MUTATE the account: set_transaction_note sets/clears a transaction's note; set_transaction_category recategorizes a transaction (optionally every related transaction from the same merchant); update_subscription corrects a recurring charge's name, amount, cadence or dates; delete_subscription removes one from the list. To recategorize, first call list_categories to see valid labels/ids, then pass a label like \"Groceries\" (or a category id) to set_transaction_category. Marking a subscription cancelled is not possible: Rocket Money's API has no such field for a subscription it detected from transactions.") +
             " If a tool reports the session is inactive, the user must re-authenticate at the auth page.",
     });
     server.registerTool("session_status", {
@@ -40,10 +61,10 @@ export function buildServer() {
     }, tool(async () => {
         const local = sessionStatus();
         if (local.status !== "live")
-            return { ...local, authenticated: false, hint: AUTH_HINT };
+            return { ...local, authenticated: false, readOnly: READ_ONLY, hint: AUTH_HINT };
         // Confirm liveness against RM (also rotates the cookie).
         const viewerId = await rm.authenticationCheck();
-        return { ...local, authenticated: Boolean(viewerId) };
+        return { ...local, authenticated: Boolean(viewerId), readOnly: READ_ONLY };
     }));
     server.registerTool("list_accounts", {
         title: "List accounts",
@@ -53,12 +74,32 @@ export function buildServer() {
     }, tool(async () => fmt.shapeAccounts(await rm.getAccounts())));
     server.registerTool("get_account", {
         title: "Get account detail",
-        description: "Detailed view of one account: current/available balance, credit limit, liability details (statement balance, minimum payment, due date, APRs), and recent daily balance history. Pass the account node id from list_accounts.",
+        description: "Detailed view of one account: current/available balance, credit limit, liability details (statement balance, minimum payment, due date, APRs), holdings (for investment accounts), and recent daily balance history. Pass the account node id from list_accounts.",
         inputSchema: {
             account_id: z.string().describe("The account node id (the `id` field from list_accounts)"),
         },
         annotations: READ,
     }, tool(async ({ account_id }) => fmt.shapeAccountDetail(await rm.getAccountDetail(account_id))));
+    server.registerTool("list_holdings", {
+        title: "List investment holdings",
+        description: "List the securities held in one investment account (401k, IRA, brokerage): ticker, name, quantity, market value, and type. Pass the account node id from list_accounts. Returns an empty list for non-investment accounts.",
+        inputSchema: {
+            account_id: z.string().describe("The account node id (the `id` field from list_accounts)"),
+        },
+        annotations: READ,
+    }, tool(async ({ account_id }) => {
+        const nodes = [];
+        rm.collectByType(await rm.getAccountDetail(account_id), "Holdings", nodes);
+        const holdings = nodes.map((h) => ({
+            ticker: h.tickerSymbol,
+            name: h.name,
+            quantity: h.quantity,
+            value: fmt.usd(h.valueCents),
+            type: h.type,
+        }));
+        const total = holdings.reduce((t, h) => t + (h.value ?? 0), 0);
+        return { count: holdings.length, totalValue: Math.round(total * 100) / 100, holdings };
+    }));
     server.registerTool("net_worth", {
         title: "Net worth",
         description: "Net worth broken down into cash, savings, investments, and debts (credit cards, loans), with per-account values and a recent net-worth trend.",
@@ -70,6 +111,24 @@ export function buildServer() {
         },
         annotations: READ,
     }, tool(async ({ use_equity }) => fmt.shapeNetWorth(await rm.getNetWorth(use_equity ?? false))));
+    server.registerTool("list_assets", {
+        title: "List manual assets",
+        description: "List the user's manually-tracked assets (vehicles, valuables, etc. under 'Other Assets') with their current value and asset id. These are assets added by hand, separate from linked institution accounts. Use the returned `id` with set_asset_value to update a balance.",
+        inputSchema: {},
+        annotations: READ,
+    }, tool(async () => {
+        const assets = await rm.getAssets();
+        return {
+            count: assets.length,
+            assets: assets.map((a) => ({
+                id: a.assetId,
+                name: a.name,
+                value: fmt.usd(a.valueCents),
+                type: a.assetType,
+                includeInNetWorth: a.includeInNetWorth,
+            })),
+        };
+    }));
     server.registerTool("spending_summary", {
         title: "Spending summary",
         description: "This month's spending and earnings vs last month, plus a per-category spending breakdown (largest first). Amounts in USD.",
@@ -84,10 +143,20 @@ export function buildServer() {
     }, tool(async () => fmt.shapeBudgets(await rm.getBudgets())));
     server.registerTool("subscriptions", {
         title: "Subscriptions / recurring",
-        description: "Active recurring charges and subscriptions with their category, next expected bill date, and next-charge estimate.",
+        description: "Every recurring charge Rocket Money tracks, active and inactive, with amount in USD, cadence (monthly/annual/semi-annual/irregular), the account or card it hits, last and next charge, category, and whether Rocket Money offers to cancel it for you. Inactive rows are included and flagged `active: false` - those are subscriptions still listed that have stopped charging, which is what a list audit is looking for. `amountSource` says whether the amount was pinned by hand, estimated by Rocket Money, or taken from the last charge.",
         inputSchema: {},
         annotations: READ,
     }, tool(async () => fmt.shapeRecurring(await rm.getRecurring())));
+    server.registerTool("get_subscription", {
+        title: "Get subscription detail",
+        description: "One recurring charge in full: everything the subscriptions list shows plus its charge history - a per-month total for the last 12 months, the individual transactions, and Rocket Money's own annualized cost. Use it to check what a subscription is really being billed before correcting it with update_subscription. Pass the subscription id from subscriptions.",
+        inputSchema: {
+            subscription_id: z
+                .string()
+                .describe("The subscription node id (the `id` field from subscriptions)"),
+        },
+        annotations: READ,
+    }, tool(async ({ subscription_id }) => fmt.shapeSubscriptionDetail(await rm.getSubscriptionDetail(subscription_id))));
     server.registerTool("upcoming_bills", {
         title: "Upcoming bills",
         description: "Upcoming subscription/bill charges in the next N days (default 28), with dates, amounts, and a total.",
@@ -98,14 +167,19 @@ export function buildServer() {
     }, tool(async ({ days }) => fmt.shapeUpcoming(await rm.getUpcoming(days ?? 28))));
     server.registerTool("search_transactions", {
         title: "Search transactions",
-        description: "Search transactions by merchant/description text and/or since a date. Both filters optional; omit query to list recent transactions. Amounts in USD; returns up to ~1200 matches.",
+        description: "Search transactions by merchant/description text, since a date, and/or account. All filters optional; omit everything to list recent transactions. Amounts in USD; returns up to ~1200 matches. Each row carries the account it posted to - pass account_ids to filter server-side, which is far cheaper than pulling every account and discarding.",
         inputSchema: {
             query: z.string().optional().describe("Merchant or description text, e.g. 'Amazon'"),
             since: z.string().optional().describe("Only transactions on/after this date (YYYY-MM-DD)"),
+            account_ids: z
+                .array(z.string())
+                .optional()
+                .describe("Only these accounts. Account node ids from list_accounts; omit for all accounts"),
         },
         annotations: READ,
-    }, tool(async ({ query, since }) => {
-        const txns = await rm.searchTransactions(query ?? null, since ?? null);
+    }, tool(async ({ query, since, account_ids }) => {
+        const txns = await rm.searchTransactions(query ?? null, since ?? null, 6, account_ids ?? []);
+        const labels = txns.length ? await accountLabels() : new Map();
         return {
             count: txns.length,
             transactions: txns.map((t) => ({
@@ -114,6 +188,7 @@ export function buildServer() {
                 amount: fmt.usd(t.amountCents),
                 name: t.name,
                 category: t.categoryLabel,
+                account: t.accountId ? (labels.get(t.accountId) ?? t.accountId) : null,
                 note: t.note,
             })),
         };
@@ -140,67 +215,194 @@ export function buildServer() {
             })),
         };
     }));
-    // ── Amazon enrichment (the only WRITE tools) ─────────────────────
-    // amazon_sync_preview / amazon_sync_status only read, so they stay available
-    // in read-only mode; everything below the guard can change Rocket Money data.
-    const WRITE = { readOnlyHint: false, openWorldHint: true };
-    server.registerTool("amazon_sync_preview", {
-        title: "Preview Amazon sync",
-        description: "DRY RUN: match recent Amazon transactions to Amazon order-confirmation emails and show what note (item name) + category WOULD be written. Writes nothing. Use this before amazon_sync_apply.",
-        inputSchema: {
-            since_days: z
-                .number()
-                .int()
-                .min(1)
-                .max(400)
-                .optional()
-                .describe("Look back this many days (default: the scheduler's lookback, 10)"),
-        },
-        annotations: READ,
-    }, tool(async ({ since_days }) => runNow(true, since_days)));
-    server.registerTool("amazon_sync_status", {
-        title: "Amazon sync status",
-        description: "Show the autonomous Amazon-sync scheduler state (enabled, interval, lookback, last run + last run's summary) and whether the Rocket Money session is live.",
+    server.registerTool("list_categories", {
+        title: "List spending categories",
+        description: "The user's full Rocket Money category catalog (default + custom), each with its label, node id, and type (expense/income/ignored). Call this to discover valid categories before recategorizing a transaction with set_transaction_category.",
         inputSchema: {},
         annotations: READ,
-    }, tool(async () => ({ scheduler: getSchedulerConfig(), session: sessionStatus(), readOnly: READ_ONLY })));
+    }, tool(async () => {
+        const cats = await rm.getTransactionCategories();
+        return {
+            count: cats.length,
+            categories: cats.map((c) => ({
+                id: c.id,
+                nodeId: c.nodeId,
+                label: c.label,
+                type: c.type,
+                categoryType: c.categoryType,
+                includeInSpending: c.includeInSpending,
+            })),
+        };
+    }));
+    // ── Write tools (these MUTATE Rocket Money) ──────────────────────
+    // ROCKETMONEY_READ_ONLY=1 stops here: the write tools are never registered,
+    // so a client cannot reach them at all.
     if (READ_ONLY)
         return server;
-    server.registerTool("amazon_sync_apply", {
-        title: "Apply Amazon sync",
-        description: "WRITES to Rocket Money: enrich recent Amazon transactions by setting each one's note to the ordered item name and its spending category. Idempotent (skips rows already synced unchanged). Run amazon_sync_preview first to see the changes.",
+    const WRITE = { readOnlyHint: false, openWorldHint: true };
+    server.registerTool("set_transaction_note", {
+        title: "Set transaction note",
+        description: "WRITES to Rocket Money: set (or clear) the free-text note on one transaction. Pass the transaction id from search_transactions/category_transactions. Use an empty string to clear the note. Returns the saved note.",
         inputSchema: {
-            since_days: z.number().int().min(1).max(400).optional().describe("Look back this many days (default 10)"),
+            transaction_id: z.string().describe("The transaction node id (the `id` from search_transactions)"),
+            note: z.string().describe("The note text to save. Pass an empty string to clear it."),
         },
         annotations: WRITE,
-    }, tool(async ({ since_days }) => runNow(false, since_days)));
-    server.registerTool("amazon_sync_backfill", {
-        title: "Backfill Amazon sync",
-        description: "WRITES to Rocket Money: one historical enrichment pass over every Amazon transaction on/after a date. Searches Amazon confirmation emails across Inbox, Archive, Trash, and Junk. Idempotent.",
+    }, tool(async ({ transaction_id, note }) => {
+        const saved = await rm.setTransactionNote(transaction_id, note);
+        return { transaction_id, note: saved, ok: true };
+    }));
+    server.registerTool("set_transaction_category", {
+        title: "Set transaction category",
+        description: "WRITES to Rocket Money: recategorize one transaction. `category` accepts a category label (e.g. \"Groceries\"), a numeric category id, or a category node id - call list_categories first to see valid options. Set apply_to_all=true to also sweep the merchant's other transactions (matched by descriptor). To recategorize a specific known set of transactions, prefer set_transactions_category - it is one round trip instead of N.",
         inputSchema: {
-            since: z.string().describe("Enrich transactions on/after this date (YYYY-MM-DD)"),
-            dry_run: z.boolean().optional().describe("Preview only, write nothing (default false)"),
+            transaction_id: z.string().describe("The transaction node id (the `id` from search_transactions)"),
+            category: z
+                .string()
+                .describe("Target category: a label like 'Groceries', a numeric id, or a category node id"),
+            apply_to_all: z
+                .boolean()
+                .optional()
+                .describe("Also recategorize all related transactions from the same merchant (default false)"),
         },
         annotations: WRITE,
-    }, tool(async ({ since, dry_run }) => syncAmazonSince(since, dry_run ?? false)));
-    server.registerTool("amazon_sync_enable", {
-        title: "Enable autonomous Amazon sync",
-        description: "Turn ON the background Amazon-sync scheduler. It then WRITES enrichment to Rocket Money every `interval_hours` (default 6) over the last `lookback_days` (default 10), whenever the session is live. Disabled by default.",
+    }, tool(async ({ transaction_id, category, apply_to_all, }) => {
+        const catNodeId = await rm.resolveCategoryNodeId(category);
+        const updated = await rm.setTransactionCategory(transaction_id, catNodeId, apply_to_all ?? false);
+        return { transaction_id, category, categoryNodeId: catNodeId, updatedCount: updated, ok: true };
+    }));
+    server.registerTool("set_transactions_category", {
+        title: "Set category on many transactions",
+        description: "WRITES to Rocket Money: recategorize a batch of transactions in one call. Pass the transaction node ids (the `id` from search_transactions) and a category label, numeric id, or category node id. Returns updatedCount as reported by Rocket Money - compare it against the number of ids you sent rather than trusting ok:true.",
         inputSchema: {
-            interval_hours: z.number().int().min(1).max(168).optional().describe("Hours between runs (default 6)"),
-            lookback_days: z.number().int().min(1).max(60).optional().describe("Days looked back each run (default 10)"),
+            transaction_ids: z
+                .array(z.string())
+                .min(1)
+                .describe("Transaction node ids to recategorize (the `id` values from search_transactions)"),
+            category: z
+                .string()
+                .describe("Target category: a label like 'Groceries', a numeric id, or a category node id"),
         },
         annotations: WRITE,
-    }, tool(async ({ interval_hours, lookback_days }) => setSchedulerConfig({
-        enabled: true,
-        ...(interval_hours !== undefined ? { intervalHours: interval_hours } : {}),
-        ...(lookback_days !== undefined ? { lookbackDays: lookback_days } : {}),
+    }, tool(async ({ transaction_ids, category }) => {
+        const catNodeId = await rm.resolveCategoryNodeId(category);
+        const updated = await rm.setTransactionsCategory(transaction_ids, catNodeId);
+        return {
+            requested: transaction_ids.length,
+            updatedCount: updated,
+            category,
+            categoryNodeId: catNodeId,
+            ok: updated === transaction_ids.length,
+        };
+    }));
+    server.registerTool("update_subscription", {
+        title: "Update a subscription",
+        description: "WRITES to Rocket Money: correct a recurring charge's name, amount, cadence or dates. Pass only what changes - the rest is preserved from a fresh read, because Rocket Money's mutation replaces the whole record. `amount` is in USD dollars. `frequency` is charges per YEAR: 12 monthly, 4 quarterly, 2 semi-annual, 1 annual. CANNOT mark a subscription cancelled or inactive: `active` is not a field Rocket Money's update mutation accepts, and the only deactivate mutation applies to hand-added subscriptions, not ones Rocket Money detected from transactions. To get a wrongly-listed charge off the list, use delete_subscription; to tell Rocket Money a dead-looking one is still live, use mark_subscription_active.",
+        inputSchema: {
+            subscription_id: z
+                .string()
+                .describe("The subscription node id (the `id` field from subscriptions)"),
+            name: z.string().optional().describe("New display name for the subscription"),
+            amount: z
+                .number()
+                .nonnegative()
+                .optional()
+                .describe("New charge amount in USD dollars (e.g. 47.88). Pins the amount Rocket Money shows."),
+            frequency: z
+                .number()
+                .int()
+                .positive()
+                .optional()
+                .describe("Charges per year: 12 monthly, 6 every 2 months, 4 quarterly, 2 semi-annual, 1 annual"),
+            next_expected_date: z
+                .string()
+                .optional()
+                .describe("Next expected charge date, YYYY-MM-DD"),
+            start_date: z.string().optional().describe("Date of the first charge, YYYY-MM-DD"),
+            end_date: z
+                .string()
+                .optional()
+                .describe("Date of the last charge, YYYY-MM-DD. This records when it last billed; it does not cancel or deactivate anything."),
+            service_type: z
+                .enum(rm.SERVICE_TYPES)
+                .optional()
+                .describe("How Rocket Money files it: subscription, bill, utility, bundled, or unknown"),
+        },
+        annotations: WRITE,
+    }, tool(async (args) => {
+        const saved = await rm.updateSubscription(args.subscription_id, {
+            name: args.name,
+            // Dollars in, cents on the wire. Every Rocket Money money field is
+            // integer cents, including this one, whose name does not say so.
+            amountCents: args.amount === undefined ? undefined : Math.round(args.amount * 100),
+            frequency: args.frequency,
+            nextExpectedDate: args.next_expected_date,
+            startDate: args.start_date,
+            endDate: args.end_date,
+            serviceType: args.service_type,
+        });
+        return {
+            id: saved.id,
+            name: saved.custom_name,
+            amount: fmt.usd(saved.amount),
+            frequency: saved.frequency,
+            cadence: fmt.cadence(saved.frequency),
+            startDate: saved.start_date,
+            endDate: saved.end_date,
+            nextBillDate: saved.expected_next_bill_date,
+            serviceType: saved.service_type,
+            ok: true,
+        };
+    }));
+    server.registerTool("mark_subscription_active", {
+        title: "Mark a subscription active",
+        description: "WRITES to Rocket Money: tell it a subscription it had marked inactive is still being charged. This is the only direction `active` moves through the API - there is no matching call to mark a detected subscription inactive. Returns the resulting active flag.",
+        inputSchema: {
+            subscription_id: z
+                .string()
+                .describe("The subscription node id (the `id` field from subscriptions)"),
+        },
+        annotations: WRITE,
+    }, tool(async ({ subscription_id }) => ({
+        subscription_id,
+        active: await rm.markSubscriptionActive(subscription_id),
+        ok: true,
     })));
-    server.registerTool("amazon_sync_disable", {
-        title: "Disable autonomous Amazon sync",
-        description: "Turn OFF the background Amazon-sync scheduler. On-demand amazon_sync_apply/preview still work.",
-        inputSchema: {},
+    server.registerTool("delete_subscription", {
+        title: "Delete a subscription",
+        description: "WRITES to Rocket Money: remove a recurring charge from the list entirely. For rows Rocket Money detected wrongly, duplicates, and charges that will never come back. This does NOT cancel anything with the merchant and it is not reversible from here - the row and its history are gone from the recurring list. Requires confirm=true. To correct a subscription rather than remove it, use update_subscription.",
+        inputSchema: {
+            subscription_id: z
+                .string()
+                .describe("The subscription node id (the `id` field from subscriptions)"),
+            confirm: z
+                .literal(true)
+                .describe("Must be true. Deleting is not reversible from this server, so it is never the default."),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    }, tool(async ({ subscription_id }) => ({
+        subscription_id,
+        deleted: await rm.deleteSubscription(subscription_id),
+        ok: true,
+    })));
+    server.registerTool("set_asset_value", {
+        title: "Set manual asset value",
+        description: "WRITES to Rocket Money: update the value/balance of a manually-tracked asset (e.g. a vehicle under 'Other Assets'). Pass the asset id from list_assets and the new value in USD dollars. Preserves the asset's name/type/net-worth setting. Returns the updated asset.",
+        inputSchema: {
+            asset_id: z.string().describe("The asset node id (the `id` from list_assets)"),
+            value: z.number().nonnegative().describe("The new asset value in USD dollars (e.g. 60000 for $60k)"),
+        },
         annotations: WRITE,
-    }, tool(async () => setSchedulerConfig({ enabled: false })));
+    }, tool(async ({ asset_id, value }) => {
+        const updated = await rm.updateAssetValue(asset_id, Math.round(value * 100));
+        return {
+            id: updated.assetId,
+            name: updated.name,
+            value: fmt.usd(updated.valueCents),
+            type: updated.assetType,
+            includeInNetWorth: updated.includeInNetWorth,
+            ok: true,
+        };
+    }));
     return server;
 }

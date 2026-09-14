@@ -14,23 +14,50 @@ const WEB_CLIENT_VERSION = process.env.ROCKETMONEY_WEB_CLIENT_VERSION ?? "2fc82a
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
-// Persisted-query hashes captured from app.rocketmoney.com-2.har (2026-07-05).
-// These are READ operations only. If RM rotates a hash the call returns
-// PersistedQueryNotFound and the tool surfaces a clear "re-capture" error.
+// Persisted-query hashes for the READ operations, lifted from the web app's own
+// traffic. The baseline came from app.rocketmoney.com-2.har (2026-07-05).
+//
+// A hash belongs to one build of the Rocket Money web bundle, so RM invalidates
+// some of them every few weeks and the fix is always the same: load the page in
+// CAPTURE_PAGE with devtools recording, find the POST whose operationName
+// matches, and copy extensions.persistedQuery.sha256Hash. Re-captured 2026-09-13:
+// AccountDetailAccountListPage, which replaces the retired SettingsAccountsPage
+// (RM no longer answers that operation at all), and AccountDetailPage.
+// SubscriptionDetailPage added 2026-09-13 from recurring.har; RecurringPage's
+// hash was unchanged in that same capture.
 const PERSISTED = {
   AuthenticationCheck: "5fe578b1917c4601cb63948f580ad3bdadded0fefa985fdd2fe2d1b913cce2d0",
   RefreshAuthToken: "a86bd0f5e3fbc3673d1215b894362c5cd28ce060a7bb326cc9fd37b06bdd9fbb",
-  SettingsAccountsPage: "9a2d400302623749fb664756a9cb6d2068c7b9d51e6608062785c60b834cb345",
-  AccountDetailPage: "43d99c4074844dc1ec67f395e25ad0b5e5da7e60aba40d1dcd96cc162b64d634",
+  AccountDetailAccountListPage: "72975ab40c3705a74516ca9ebf4ae78876c103e409c795f2aaea8f2d283fb78a",
+  AccountDetailPage: "70347255abce45e4b1ea63edbb6dc8fc7f170b040854443bb32eb1ab6029fd2d",
   NetWorthQuery: "5d319beb9e4b601c8381198731cbdaeeba106e442c44c049e4333142db07ed11",
   SpendingPage: "26e04b9b4bcf2033891037bda8b67e43afc96684f0d734883fa1af75776f14fa",
   Budgets: "f55267f5c1dacf4bfa2c92893506f771f49e3ddc04d34fa14d21d0ffeea4dfbe",
   RecurringPage: "1c6519edc695c49825a35112df49ffc275bec318736e364c5991dfef6a29430f",
+  SubscriptionDetailPage: "9556941e4ff9bdc23d43801774a45e8dc01b67b547aab774abcd9815bb5b0f3c",
   RecurringUpcomingPage: "f1dd34f01b69dd0367a8b20a07b8b45977ab6d1ce0d31919b1b4143e5ba205bc",
   TransactionCategoryPage: "1edf87cac5ca2a6428aeea4e35ae0521d0707f1e6e1fba6715ddc1d2a634fddf",
   TransactionsPageTransactionTable:
     "5bc74a0e8d2c33efe103eeb87d6ec09d9b57fb34795597ef2e3f7d892d76a056",
+  // The user's full category catalog (default + custom), with node ids. Captured
+  // from app.rocketmoney.com.har (2026-07-05). Read-only; rotating is handled the
+  // same as any other persisted read (PersistedQueryNotFound -> re-capture).
+  TransactionCategories: "b8734a0ec18579870ec0e707beca2a05450193c99e55df6f165be9d18a53e6b4",
 } as const;
+
+// Where in the web app each operation fires, so the PersistedQueryNotFound error
+// can send you straight to the page that will hand you the new hash. Only routes
+// actually observed in a capture are listed; add one the next time you watch an
+// operation go past rather than guessing it from the operation name.
+const CAPTURE_PAGE: Partial<Record<keyof typeof PERSISTED, string>> = {
+  AuthenticationCheck: "https://app.rocketmoney.com/ (fires on every page)",
+  RefreshAuthToken: "https://app.rocketmoney.com/ (fires on every page)",
+  AccountDetailAccountListPage: "https://app.rocketmoney.com/account",
+  AccountDetailPage: "https://app.rocketmoney.com/account (then click an account)",
+  NetWorthQuery: "https://app.rocketmoney.com/net-worth",
+  RecurringPage: "https://app.rocketmoney.com/recurring",
+  SubscriptionDetailPage: "https://app.rocketmoney.com/recurring (then click a subscription)",
+};
 
 /** Thrown when the session is no longer authenticated (cookie expired/revoked). */
 export class RMAuthError extends Error {}
@@ -42,17 +69,57 @@ export function toNodeId(type: string, numericId: string | number): string {
   return Buffer.from(`${type}:${numericId}`).toString("base64");
 }
 
+/** Inverse of toNodeId: decode a Relay node id into `{ type, numericId }`, or null. */
+export function fromNodeId(nodeId: string): { type: string; numericId: string } | null {
+  try {
+    const decoded = Buffer.from(nodeId, "base64").toString("utf8");
+    const idx = decoded.indexOf(":");
+    if (idx <= 0) return null;
+    const type = decoded.slice(0, idx);
+    const numericId = decoded.slice(idx + 1);
+    // Round-trip guard: reject inputs that aren't really base64 node ids.
+    if (!/^[A-Za-z]+$/.test(type) || toNodeId(type, numericId) !== nodeId) return null;
+    return { type, numericId };
+  } catch {
+    return null;
+  }
+}
+
 interface GraphQLBody {
   operationName: keyof typeof PERSISTED;
   variables?: Record<string, unknown>;
 }
 
+// Serialize every RM API call. The session cookie is a ROLLING token: each
+// response rotates it (Set-Cookie), and we persist the rotated jar. Two calls in
+// flight at once both send the same pre-rotation cookie; RM rotates it for the
+// first and the second's copy is instantly stale -> 401 -> the whole session is
+// marked dead. So a bot firing parallel tool calls (session_status + list_accounts
+// + budgets) would knock itself offline. Chaining calls onto a single promise
+// makes load-jar -> request -> save-jar atomic; concurrent callers just queue.
+let rmChain: Promise<unknown> = Promise.resolve();
+
 /**
  * Core executor: POST a full GraphQL body with the live cookie jar, rotate the
  * jar from the response's Set-Cookie headers, and persist it. Throws
  * RMAuthError if the session is dead so callers can report "re-auth needed".
+ * Serialized via rmChain so concurrent requests can't race the rolling cookie.
  */
-async function rmExecute<T = unknown>(opName: string, payload: Record<string, unknown>): Promise<T> {
+function rmExecute<T = unknown>(opName: string, payload: Record<string, unknown>): Promise<T> {
+  const run = rmChain.then(
+    () => rmExecuteUnlocked<T>(opName, payload),
+    () => rmExecuteUnlocked<T>(opName, payload), // run even if the previous call rejected
+  );
+  // Keep the chain alive regardless of this call's outcome (swallow here only;
+  // the real result/rejection still propagates to the caller via `run`).
+  rmChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+async function rmExecuteUnlocked<T = unknown>(opName: string, payload: Record<string, unknown>): Promise<T> {
   const jar = loadSession();
   if (!jar) throw new RMAuthError("No Rocket Money session. Paste a fresh cookie at /auth.");
 
@@ -98,8 +165,14 @@ async function rmExecute<T = unknown>(opName: string, payload: Record<string, un
       throw new RMAuthError(`Rocket Money auth failed: ${authErr.message}. Re-auth at /auth.`);
     }
     if (json.errors.some((e) => /PersistedQueryNotFound/i.test(e.message))) {
+      const page =
+        CAPTURE_PAGE[opName as keyof typeof PERSISTED] ??
+        "the Rocket Money web app page that shows this data";
       throw new Error(
-        `RM ${opName}: PersistedQueryNotFound - Rocket Money rotated this query hash; re-capture it from a fresh HAR and update PERSISTED in client.ts.`,
+        `RM ${opName}: PersistedQueryNotFound - Rocket Money rotated this query hash. ` +
+          `To re-capture: with devtools recording, load ${page}, find the POST to ` +
+          `client-api.rocketmoney.com/graphql whose operationName is ${opName}, copy ` +
+          `extensions.persistedQuery.sha256Hash, and update PERSISTED in client.ts.`,
       );
     }
     throw new Error(`RM ${opName}: ${json.errors.map((e) => e.message).join("; ")}`);
@@ -161,6 +234,21 @@ function collectByType(obj: unknown, typename: string, out: Record<string, unkno
   for (const v of Object.values(o)) collectByType(v, typename, out);
 }
 
+function collectWhere(
+  obj: unknown,
+  match: (o: Record<string, unknown>) => boolean,
+  out: Record<string, unknown>[],
+): void {
+  if (!obj || typeof obj !== "object") return;
+  if (Array.isArray(obj)) {
+    for (const el of obj) collectWhere(el, match, out);
+    return;
+  }
+  const o = obj as Record<string, unknown>;
+  if (match(o)) out.push(o);
+  for (const v of Object.values(o)) collectWhere(v, match, out);
+}
+
 function findPageInfo(obj: unknown): { hasNextPage: boolean; endCursor: string | null } | null {
   if (!obj || typeof obj !== "object") return null;
   const o = obj as Record<string, unknown>;
@@ -189,7 +277,7 @@ export async function refreshAuthToken(): Promise<void> {
 
 /** Every institution + account with current balance. */
 export async function getAccounts(): Promise<Record<string, unknown>> {
-  return rmGraphQL({ operationName: "SettingsAccountsPage" });
+  return rmGraphQL({ operationName: "AccountDetailAccountListPage" });
 }
 
 /** One account's detail: balances, liabilities/APRs, 6-month balance history. */
@@ -213,6 +301,65 @@ export async function getNetWorth(useEquity = false): Promise<Record<string, unk
     operationName: "NetWorthQuery",
     variables: { sixMonthsAgo: w.sixMonthsAgo, useEquity, lastMonth: w.lastMonthEnd },
   });
+}
+
+export interface RMAsset {
+  assetId: string; // base64 Asset node id (base64("Asset:<numeric>"))
+  name: string;
+  valueCents: number;
+  assetType: string; // e.g. "vehicle", "home", "other"
+  includeInNetWorth: boolean;
+}
+
+/**
+ * READ: the user's manually-tracked assets (vehicles, valuables, hand-entered
+ * savings), which RM returns inside the net-worth view. These are the assets you
+ * add by hand, distinct from linked institution accounts.
+ *
+ * They are NOT confined to the `other` bucket: RM files each one by its
+ * assetType, so a savings-type asset arrives as a `NetWorthCash` node sitting
+ * alongside the linked checking accounts. Filtering on `__typename` therefore
+ * silently hides them. The reliable marker is `assetNodeId` - only manual assets
+ * carry one, and linked accounts get `accountNodeId` instead.
+ */
+export async function getAssets(): Promise<RMAsset[]> {
+  const data = await getNetWorth(false);
+  const nodes: Record<string, unknown>[] = [];
+  collectWhere(data, (o) => o.assetNodeId != null, nodes);
+  return nodes.map((o) => ({
+    assetId: String(o.assetNodeId ?? ""),
+    name: String(o.name ?? ""),
+    valueCents: typeof o.valueCents === "number" ? o.valueCents : 0,
+    // `assetType` only exists on NetWorthOther nodes; a manual asset filed into
+    // another bucket carries its kind in `type` ("manual") instead.
+    assetType: String(o.assetType ?? o.type ?? ""),
+    includeInNetWorth: Boolean(o.includeInNetWorth),
+  }));
+}
+
+/**
+ * WRITE: set a manual asset's value (in cents). RM stores asset values as a
+ * dated time series, so setting the value means recording a value point for
+ * today via `createAssetValue` (same-date calls update in place - no duplicate).
+ * `UpdateAsset` only edits name/type/includeInNetWorth; it rejects valueCents.
+ * Returns the updated asset (from the mutation payload).
+ */
+export async function updateAssetValue(assetNodeId: string, valueCents: number): Promise<RMAsset> {
+  const today = ymd(new Date());
+  const data = await rmMutation<{ createAssetValue?: { asset?: Record<string, unknown> } }>(
+    "CreateAssetValue",
+    "mutation CreateAssetValue($input: CreateAssetValueInput!) {\n  createAssetValue(input: $input) {\n    asset {\n      id\n      name\n      type\n      includeInNetWorth\n      valueCents\n      __typename\n    }\n    __typename\n  }\n}",
+    { input: { assetNodeId, valueCents, date: today } },
+  );
+  const a = data.createAssetValue?.asset;
+  if (!a) throw new Error(`createAssetValue returned no asset for "${assetNodeId}".`);
+  return {
+    assetId: String(a.id ?? assetNodeId),
+    name: String(a.name ?? ""),
+    valueCents: typeof a.valueCents === "number" ? a.valueCents : valueCents,
+    assetType: String(a.type ?? ""),
+    includeInNetWorth: Boolean(a.includeInNetWorth),
+  };
 }
 
 /** This-month vs last-month spending, earnings, and per-category breakdown. */
@@ -263,6 +410,159 @@ export async function getRecurring(): Promise<Record<string, unknown>> {
   });
 }
 
+/**
+ * One recurring charge in full: everything the list carries plus its yearly
+ * cost, transaction count, a 12-month bar chart and its own transaction list.
+ * `startDate`/`endDate` bound the transaction list; RM's own client sends null
+ * for both and gets the default window, so null is the normal call.
+ */
+export async function getSubscriptionDetail(
+  subscriptionNodeId: string,
+  startDate: string | null = null,
+  endDate: string | null = null,
+): Promise<Record<string, unknown>> {
+  return rmGraphQL({
+    operationName: "SubscriptionDetailPage",
+    variables: { id: subscriptionNodeId, startDate, endDate },
+  });
+}
+
+/**
+ * The subset of a subscription a caller may change, in our own vocabulary
+ * (dollars and plain names). `amountCents` is cents because that is the unit
+ * that crosses the wire; the MCP layer takes dollars and converts.
+ */
+export interface RMSubscriptionEdit {
+  name?: string;
+  amountCents?: number;
+  frequency?: number;
+  nextExpectedDate?: string;
+  startDate?: string;
+  endDate?: string;
+  serviceType?: string;
+}
+
+/** The five ServiceType enum members RM accepts on UpdateSubscriptionInput. */
+export const SERVICE_TYPES = ["subscription", "bill", "utility", "bundled", "unknown"] as const;
+
+/**
+ * Merge a caller's edits over a subscription node into an UpdateSubscriptionInput.
+ *
+ * The mutation is a whole-object write, and `service_name` is `String!`, so a
+ * caller changing only the amount still has to resend the name. Everything the
+ * caller did not touch therefore comes from `node`, which must be a freshly read
+ * subscription rather than a remembered one.
+ *
+ * Fields still null on the node are omitted rather than sent as null. That
+ * matters most for `amount`: RM leaves it null while it is inferring the charge
+ * from transaction history, and writing a value pins it (observed 2026-09-13,
+ * where one edit turned a null `amount` into 4788 with no other change). Sending
+ * a null we invented would be a silent edit of its own.
+ */
+export function buildSubscriptionUpdateInput(
+  node: Record<string, unknown>,
+  edit: RMSubscriptionEdit = {},
+): Record<string, unknown> {
+  const service = (node.service ?? {}) as Record<string, unknown>;
+  const name = edit.name ?? node.custom_name ?? service.name;
+  if (typeof name !== "string" || !name) {
+    throw new Error("Subscription has no name and none was supplied; service_name is required.");
+  }
+  const input: Record<string, unknown> = { id: node.id, service_name: name };
+  const put = (key: string, value: unknown) => {
+    if (value !== null && value !== undefined) input[key] = value;
+  };
+  put("service_id", service._id);
+  put("amount", edit.amountCents ?? node.amount);
+  put("frequency", edit.frequency ?? node.frequency);
+  put("start_date", edit.startDate ?? node.start_date);
+  put("end_date", edit.endDate ?? node.end_date);
+  put("next_expected_date", edit.nextExpectedDate ?? node.expected_next_bill_date);
+  put("service_type", edit.serviceType ?? node.service_type);
+  return input;
+}
+
+const UPDATE_SUBSCRIPTION = `mutation UpdateSubscription($input: UpdateSubscriptionInput!) {
+  updateSubscription(input: $input) {
+    subscription {
+      __typename
+      id
+      amount
+      frequency
+      custom_name
+      start_date
+      end_date
+      expected_next_bill_date
+      service_type
+      custom_service_type
+      service {
+        __typename
+        id
+      }
+    }
+    __typename
+  }
+}`;
+
+/**
+ * WRITE: correct a recurring charge's name, amount, cadence or dates.
+ *
+ * Reads the subscription first and merges, because the mutation replaces the
+ * whole object. Returns the mutation's own payload so the caller can compare
+ * what RM saved against what it asked for.
+ *
+ * `active` is NOT reachable here: UpdateSubscriptionInput accepts only id,
+ * service_name, service_id, amount, frequency, start_date, end_date,
+ * next_expected_date and service_type (established 2026-09-13 by probing the
+ * schema's validation errors, introspection being disabled).
+ */
+export async function updateSubscription(
+  subscriptionNodeId: string,
+  edit: RMSubscriptionEdit,
+): Promise<Record<string, unknown>> {
+  const detail = await getSubscriptionDetail(subscriptionNodeId);
+  const node = (detail.node ?? null) as Record<string, unknown> | null;
+  if (!node?.id) throw new Error(`No subscription found for id "${subscriptionNodeId}".`);
+  const input = buildSubscriptionUpdateInput(node, edit);
+  const data = await rmMutation<{ updateSubscription?: { subscription?: Record<string, unknown> } }>(
+    "UpdateSubscription",
+    UPDATE_SUBSCRIPTION,
+    { input },
+  );
+  const saved = data.updateSubscription?.subscription;
+  if (!saved) throw new Error(`updateSubscription returned no subscription for "${subscriptionNodeId}".`);
+  return saved;
+}
+
+/**
+ * WRITE: tell Rocket Money a subscription it had written off is still live.
+ * This is the one direction `active` moves through the API: there is a
+ * `deactivateManualSubscription` for hand-added ones, but nothing that
+ * deactivates a subscription RM detected from transactions.
+ */
+export async function markSubscriptionActive(subscriptionNodeId: string): Promise<boolean> {
+  const data = await rmMutation<{ markSubscriptionActive?: { subscription?: { active?: boolean } } }>(
+    "MarkSubscriptionActive",
+    "mutation MarkSubscriptionActive($input: MarkSubscriptionActiveInput!) {\n  markSubscriptionActive(input: $input) {\n    subscription {\n      __typename\n      id\n      active\n    }\n    __typename\n  }\n}",
+    { input: { subscriptionId: subscriptionNodeId } },
+  );
+  return data.markSubscriptionActive?.subscription?.active ?? false;
+}
+
+/**
+ * WRITE: drop a recurring charge from Rocket Money's list entirely. For rows RM
+ * detected wrongly, or duplicates of a subscription already tracked. This is not
+ * a cancellation: the merchant keeps charging, RM just stops listing it.
+ */
+export async function deleteSubscription(subscriptionNodeId: string): Promise<boolean> {
+  const data = await rmMutation<{ deleteSubscription?: Record<string, unknown> }>(
+    "DeleteSubscription",
+    "mutation DeleteSubscription($input: DeleteSubscriptionInput!) {\n  deleteSubscription(input: $input) {\n    __typename\n  }\n}",
+    { input: { subscriptionId: subscriptionNodeId } },
+  );
+  return Boolean(data.deleteSubscription);
+}
+
 /** Upcoming bill/subscription charges in the next `days` days (default 28). */
 export async function getUpcoming(days = 28): Promise<Record<string, unknown>> {
   const now = new Date();
@@ -297,16 +597,23 @@ export interface RMTransaction {
   note: string | null;
   name: string;
   categoryLabel: string | null;
+  accountId: string | null;
 }
 
 /**
  * Search transactions matching `query` (optional) on/after `gteDate`
  * (YYYY-MM-DD, optional). Paginates up to a safety cap and dedupes.
+ *
+ * `accountIds` takes Account node ids (the same base64 ids getAccounts returns);
+ * empty means every account. Without it there is no way to tell which card a
+ * charge landed on, since the merchant descriptor alone does not identify the
+ * account.
  */
 export async function searchTransactions(
   query: string | null,
   gteDate: string | null,
   maxPages = 6,
+  accountIds: string[] = [],
 ): Promise<RMTransaction[]> {
   const all: RMTransaction[] = [];
   let cursor: string | null = null;
@@ -317,7 +624,7 @@ export async function searchTransactions(
       variables: {
         query,
         order: "reverse:date",
-        accountIds: [],
+        accountIds,
         transactionCategoryIds: [],
         gteDate,
         ltDate: null,
@@ -333,6 +640,7 @@ export async function searchTransactions(
     for (const o of nodes) {
       if (typeof o.id !== "string" || typeof o.amount !== "number") continue;
       const category = o.category as { label?: string } | null | undefined;
+      const account = o.account as { id?: string } | null | undefined;
       all.push({
         nodeId: o.id,
         amountCents: o.amount,
@@ -340,6 +648,7 @@ export async function searchTransactions(
         note: (o.note as string | null) ?? null,
         name: String(o.longName ?? o.shortName ?? ""),
         categoryLabel: category?.label ?? null,
+        accountId: account?.id ?? null,
       });
     }
 
@@ -352,36 +661,139 @@ export async function searchTransactions(
   return all.filter((t) => (seen.has(t.nodeId) ? false : (seen.add(t.nodeId), true)));
 }
 
-// ── Write operations (Amazon enrichment) ──────────────────────────
-// These MUTATE Rocket Money. Everything above is read-only; keep it that way.
+// ── Categories ─────────────────────────────────────────────────────
+
+export interface RMCategory {
+  nodeId: string; // base64 Relay id, pass straight to setTransactionCategory
+  id: string; // numeric id decoded from the node id
+  label: string;
+  type: string; // "default" | "custom"
+  categoryType: string; // "expense" | "income" | "ignored"
+  includeInSpending: boolean;
+  includeInEarnings: boolean;
+  taxDeductible: boolean;
+}
 
 /** base64(`TransactionCategory:<id>`) for a numeric category id. */
 export function categoryNodeId(numericId: string | number): string {
   return toNodeId("TransactionCategory", numericId);
 }
 
-/** WRITE: set a transaction's free-text note (used to store the Amazon item name). */
-export async function setTransactionNote(nodeId: string, note: string): Promise<void> {
-  await rmMutation(
+/** READ: the user's full category catalog (default + custom), with node ids. */
+export async function getTransactionCategories(): Promise<RMCategory[]> {
+  const data = await rmGraphQL<Record<string, unknown>>({ operationName: "TransactionCategories" });
+  const nodes: Record<string, unknown>[] = [];
+  collectByType(data, "TransactionCategory", nodes);
+  const seen = new Set<string>();
+  const cats: RMCategory[] = [];
+  for (const o of nodes) {
+    const nodeId = typeof o.id === "string" ? o.id : "";
+    if (!nodeId || seen.has(nodeId)) continue;
+    seen.add(nodeId);
+    cats.push({
+      nodeId,
+      id: fromNodeId(nodeId)?.numericId ?? "",
+      label: String(o.label ?? ""),
+      type: String(o.type ?? ""),
+      categoryType: String(o.categoryType ?? ""),
+      includeInSpending: Boolean(o.includeInSpending),
+      includeInEarnings: Boolean(o.includeInEarnings),
+      taxDeductible: Boolean(o.taxDeductible),
+    });
+  }
+  return cats.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+// Per-process memo of the category catalog. Categories change rarely and the Fly
+// machine stays warm, so caching spares a round-trip on every label resolution.
+let _catCache: { at: number; cats: RMCategory[] } | null = null;
+const CAT_TTL_MS = 10 * 60 * 1000;
+
+async function categoriesCached(): Promise<RMCategory[]> {
+  if (_catCache && Date.now() - _catCache.at < CAT_TTL_MS) return _catCache.cats;
+  const cats = await getTransactionCategories();
+  _catCache = { at: Date.now(), cats };
+  return cats;
+}
+
+/**
+ * Resolve a caller-supplied category (a label like "Groceries", a numeric id, or
+ * a base64 TransactionCategory node id) to a node id. Throws a clear, actionable
+ * error listing valid labels when a label doesn't match.
+ */
+export async function resolveCategoryNodeId(input: string | number): Promise<string> {
+  const raw = String(input).trim();
+  // Already a TransactionCategory node id?
+  if (fromNodeId(raw)?.type === "TransactionCategory") return raw;
+  // Bare numeric id -> build the node id (no lookup needed).
+  if (/^\d+$/.test(raw)) return categoryNodeId(raw);
+  // Otherwise treat it as a label and look it up (case-insensitive).
+  const cats = await categoriesCached();
+  const match = cats.find((c) => c.label.toLowerCase() === raw.toLowerCase());
+  if (match) return match.nodeId;
+  throw new Error(
+    `Unknown category "${raw}". Use list_categories to see valid options. Available: ${cats
+      .map((c) => c.label)
+      .join(", ")}`,
+  );
+}
+
+/** WRITE: set (or clear, with "") a transaction's free-text note. Returns the saved note. */
+export async function setTransactionNote(nodeId: string, note: string): Promise<string> {
+  const data = await rmMutation<{ setTransactionNote?: { transaction?: { note?: string } } }>(
     "SetTransactionNote",
     "mutation SetTransactionNote($input: SetTransactionNoteInput!) {\n  setTransactionNote(input: $input) {\n    __typename\n    transaction {\n      __typename\n      id\n      note\n    }\n  }\n}",
     { input: { transactionNodeId: nodeId, note } },
   );
+  return data.setTransactionNote?.transaction?.note ?? note;
 }
 
-/** WRITE: set a transaction's spending category. */
-export async function setTransactionCategory(nodeId: string, catNodeId: string): Promise<void> {
-  await rmMutation(
-    "SetTransactionCategory",
-    "mutation SetTransactionCategory($input: SetTransactionCategoryInput!) {\n  setTransactionCategory(input: $input) {\n    __typename\n    updatedTransactions {\n      id\n      __typename\n    }\n  }\n}",
+/**
+ * WRITE: set the spending category on many transactions in one round trip.
+ * This is the mutation the web app fires when you multi-select rows, and it is
+ * the only reliable way to recategorize in bulk. Returns RM's own countUpdated.
+ */
+export async function setTransactionsCategory(
+  nodeIds: string[],
+  catNodeId: string,
+): Promise<number> {
+  if (nodeIds.length === 0) return 0;
+  const data = await rmMutation<{ setTransactionsCategory?: { countUpdated?: number } }>(
+    "SetTransactionsCategory",
+    "mutation SetTransactionsCategory($input: SetTransactionsCategoryInput!) {\n  setTransactionsCategory(input: $input) {\n    transactions {\n      id\n      category {\n        id\n        __typename\n      }\n      ignoredFrom\n      __typename\n    }\n    countUpdated\n    transactionOverrideIds\n    __typename\n  }\n}",
     {
       input: {
-        transactionNodeId: nodeId,
+        transactionNodeIds: nodeIds,
         transactionCategoryNodeId: catNodeId,
-        categorizeAllRelatedTransactions: false,
       },
     },
   );
+  return data.setTransactionsCategory?.countUpdated ?? 0;
+}
+
+/**
+ * WRITE: set one transaction's spending category. `catNodeId` must be a
+ * TransactionCategory node id (use resolveCategoryNodeId to accept labels/ids).
+ *
+ * `applyToAll` sweeps the merchant's other rows by looking the merchant name up
+ * and bulk-setting the matches. It deliberately does NOT use the singular
+ * mutation's `categorizeAllRelatedTransactions` input: RM accepts that field and
+ * returns success, but only ever updates the one transaction you named, so a
+ * caller trusting it silently leaves the rest of the merchant behind.
+ */
+export async function setTransactionCategory(
+  nodeId: string,
+  catNodeId: string,
+  applyToAll = false,
+): Promise<number> {
+  if (!applyToAll) return setTransactionsCategory([nodeId], catNodeId);
+
+  const self = (await searchTransactions(null, null, 1)).find((t) => t.nodeId === nodeId);
+  if (!self?.name) return setTransactionsCategory([nodeId], catNodeId);
+
+  const related = await searchTransactions(self.name, null, 6);
+  const ids = new Set<string>([nodeId, ...related.map((t) => t.nodeId)]);
+  return setTransactionsCategory([...ids], catNodeId);
 }
 
 export { findByType, collectByType };

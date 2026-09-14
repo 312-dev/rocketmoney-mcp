@@ -11,34 +11,71 @@ export function usd(cents) {
         return null;
     return Math.round(cents) / 100;
 }
-/** Some RM fields are already dollars (displayedBalance); pass through as number. */
-function num(v) {
-    return typeof v === "number" ? v : null;
-}
-// ── accounts (SettingsAccountsPage) ────────────────────────────────
+// Every RM money field is integer cents, including the ones whose names lack the
+// usual `Cents` suffix (displayedBalance, currentBalance, available_balance,
+// credit_limit, and netWorth/asset/debt on the history rows). Passing one through
+// raw reports it 100x, so route them all through usd().
+// ── accounts (AccountDetailAccountListPage) ────────────────────────
+// RM returns the account list as one connection per account type rather than one
+// list. The type is already on each node as `customType`, so the buckets carry no
+// information beyond ordering; they only decide which nodes we have to visit.
+//
+// The buckets overlap: `otherAccounts` repeats nodes that also appear under
+// `checkingAccounts` and `savingsAccounts`, byte for byte. Visiting it last means
+// the typed buckets are what set each account's position, and the id dedupe below
+// drops the repeat. In the 2026-09-13 capture that is 20 edges over 15 accounts.
+const ACCOUNT_BUCKETS = [
+    "checkingAccounts",
+    "savingsAccounts",
+    "creditAccounts",
+    "investmentAccounts",
+    "savingsPlanAccounts",
+    "otherAccounts",
+];
+/**
+ * Group every account under the institution that holds it. Each node carries its
+ * own `masterAccount` (one linked login at one bank), which is where the
+ * institution name and the connection status live - the node's own `institution`
+ * has an id but no name. Grouping by masterAccount id keeps two logins at the
+ * same bank apart, which is the case a name-keyed grouping would merge.
+ */
 export function shapeAccounts(data) {
-    const edges = asArr(asObj(asObj(asObj(data).viewer).masterAccounts).edges);
-    const institutions = edges.map((e) => {
-        const node = asObj(asObj(e).node);
-        const inst = asObj(node.institution);
-        const accts = asArr(asObj(node.accounts).edges).map((ae) => {
-            const a = asObj(asObj(ae).node);
-            return {
+    const viewer = asObj(asObj(data).viewer);
+    const groups = new Map();
+    const seen = new Set();
+    for (const bucket of ACCOUNT_BUCKETS) {
+        for (const e of asArr(asObj(viewer[bucket]).edges)) {
+            const a = asObj(asObj(e).node);
+            if (typeof a.id === "string") {
+                if (seen.has(a.id))
+                    continue;
+                seen.add(a.id);
+            }
+            const master = asObj(a.masterAccount);
+            // Keyed on the account's own id when there is no masterAccount, so an
+            // unlinked account lands in a group of one instead of merging into a
+            // single nameless bucket with every other one.
+            const key = typeof master.id === "string" ? master.id : `account:${String(a.id)}`;
+            let group = groups.get(key);
+            if (!group) {
+                group = {
+                    institution: asObj(master.institution).name,
+                    status: master.status,
+                    accounts: [],
+                };
+                groups.set(key, group);
+            }
+            group.accounts.push({
                 id: a.id,
                 name: a.name ?? a.defaultName,
                 type: a.customType,
                 mask: a.number,
-                balance: num(a.displayedBalance),
+                balance: usd(a.displayedBalance),
                 enabled: a.enabled,
-            };
-        });
-        return {
-            institution: inst.name,
-            status: node.status,
-            accounts: accts,
-        };
-    });
-    return { institutions };
+            });
+        }
+    }
+    return { institutions: [...groups.values()] };
 }
 // ── account detail (AccountDetailPage) ─────────────────────────────
 export function shapeAccountDetail(data) {
@@ -50,10 +87,10 @@ export function shapeAccountDetail(data) {
         category: a.category,
         institution: asObj(a.institution).name,
         mask: a.number,
-        currentBalance: num(a.currentBalance),
-        availableBalance: num(a.available_balance),
-        displayedBalance: num(a.displayedBalance),
-        creditLimit: num(a.credit_limit),
+        currentBalance: usd(a.currentBalance),
+        availableBalance: usd(a.available_balance),
+        displayedBalance: usd(a.displayedBalance),
+        creditLimit: usd(a.credit_limit),
         firstSyncDate: a.firstSyncDate,
         liability: liab.__typename
             ? {
@@ -73,6 +110,16 @@ export function shapeAccountDetail(data) {
                 }),
             }
             : null,
+        holdings: asArr(a.holdings).map((h) => {
+            const p = asObj(h);
+            return {
+                ticker: p.tickerSymbol,
+                name: p.name,
+                quantity: p.quantity,
+                value: usd(p.valueCents),
+                type: p.type,
+            };
+        }),
         balanceHistory: asArr(a.sixMonthDailyHistory)
             .map((h) => {
             const p = asObj(h);
@@ -85,7 +132,14 @@ export function shapeAccountDetail(data) {
 function holdings(list) {
     return asArr(list).map((x) => {
         const p = asObj(x);
+        // Manual assets carry `assetNodeId`; linked accounts carry `accountNodeId`.
+        // Surfacing the id is what lets a caller act on what it just read - without
+        // it, set_asset_value has nothing to address.
+        const assetId = p.assetNodeId ? String(p.assetNodeId) : null;
+        const accountId = p.accountNodeId ? String(p.accountNodeId) : null;
         return {
+            id: assetId ?? accountId,
+            manual: assetId !== null,
             name: p.name,
             value: usd(p.valueCents ?? p.balanceCents),
             limit: usd(p.limitCents),
@@ -100,26 +154,39 @@ export function shapeNetWorth(data) {
     const cash = sum(nw.cash);
     const savings = sum(nw.savings);
     const investments = sum(nw.investments);
+    // `other` holds the hand-entered assets (the vehicle, valuables). Leaving it
+    // out understated net worth by their full value - RM's own
+    // sixMonthDailyHistory counts them, so the two numbers disagreed.
+    const other = sum(nw.other);
     const creditCardDebt = sum(nw.creditCardDebts);
     const longTermDebt = sum(nw.longTermDebts);
     const otherDebt = sum(nw.otherDebts);
-    const assets = cash + savings + investments;
+    const assets = cash + savings + investments + other;
     const debts = creditCardDebt + longTermDebt + otherDebt;
+    // These three are cents too, despite the missing `Cents` suffix; before that was
+    // spotted `trend` reported values 100x the `netWorth`/`totals` beside it.
     const history = asArr(nw.sixMonthDailyHistory).map((h) => {
         const p = asObj(h);
-        return { date: p.date, netWorth: num(p.netWorth), asset: num(p.asset), debt: num(p.debt) };
+        return { date: p.date, netWorth: usd(p.netWorth), asset: usd(p.asset), debt: usd(p.debt) };
     });
     return {
         netWorth: Math.round((assets - debts) * 100) / 100,
-        totals: { assets, debts, cash, savings, investments, creditCardDebt, longTermDebt, otherDebt },
+        totals: {
+            assets, debts, cash, savings, investments, other,
+            creditCardDebt, longTermDebt, otherDebt,
+        },
         accounts: {
             cash: holdings(nw.cash),
             savings: holdings(nw.savings),
             investments: holdings(nw.investments),
+            other: holdings(nw.other),
             creditCardDebts: holdings(nw.creditCardDebts),
             longTermDebts: holdings(nw.longTermDebts),
         },
-        trend: history.slice(-30),
+        // RM returns sixMonthDailyHistory newest-first, so slice(-30) took the 30
+        // OLDEST days - six months of stale (often all-zero) rows presented as a
+        // recent trend. Take from the head instead.
+        trend: history.slice(0, 30),
     };
 }
 // ── spending (SpendingPage) ────────────────────────────────────────
@@ -166,26 +233,161 @@ export function shapeBudgets(data) {
     };
 }
 // ── recurring / subscriptions (RecurringPage) ──────────────────────
-export function shapeRecurring(data) {
+// `frequency` is the number of charges per YEAR, not an interval in months, and
+// getting that backwards inverts annual and monthly. Read off the 2026-09-13
+// capture of 50 recurring nodes: 1 is annual (1Password, charged 2026-08-15,
+// next 2027-08-15), 2 is semi-annual (AAA Insurance, charged 2026-04-14, next
+// 2026-10-14), and 12 is monthly, which covers 46 of the 50. The other entries
+// below follow from the same charges-per-year arithmetic but were not in that
+// capture, so an unlisted value falls through to "N times a year" rather than
+// being guessed at.
+const CADENCE = {
+    1: "annual",
+    2: "semi-annual",
+    3: "every 4 months",
+    4: "quarterly",
+    6: "every 2 months",
+    12: "monthly",
+    24: "twice a month",
+    26: "every 2 weeks",
+    52: "weekly",
+    365: "daily",
+};
+/**
+ * Human cadence for a `frequency`. A null frequency means Rocket Money has not
+ * settled on one - CloudFlare and a card membership fee both carry it, and both
+ * have no nextCharge at all - so it reads as "irregular". Never zero, and never
+ * silently monthly.
+ */
+export function cadence(frequency) {
+    if (typeof frequency !== "number" || !Number.isFinite(frequency))
+        return "irregular";
+    return CADENCE[frequency] ?? `${frequency} times a year`;
+}
+/** "Bluevine 312.dev LLC Checking 0322" for the account a charge lands on. */
+function accountLabel(account) {
+    const parts = [asObj(account.institution).short_name, account.name, account.number]
+        .filter(Boolean)
+        .map(String);
+    return parts.length ? parts.join(" ") : null;
+}
+/**
+ * One recurring charge, flattened.
+ *
+ * Three fields carry an amount and they mean different things. `amount` on the
+ * node is a value someone pinned by hand and is null while RM is still inferring
+ * the charge from transactions (48 of 50 nodes in the 2026-09-13 capture);
+ * `nextCharge.chargeAmount` is RM's own estimate; `lastTransaction.amount` is
+ * what actually posted. `amount` is the first of those that is set, and
+ * `amountSource` says which one it came from, so a caller correcting a stale
+ * figure can see whether it was pinned or merely predicted.
+ */
+function shapeSubscriptionNode(n) {
+    const service = asObj(n.service);
+    const next = asObj(n.nextCharge);
+    const last = asObj(n.lastTransaction);
+    const pinned = usd(n.amount);
+    const estimated = usd(next.chargeAmount);
+    const lastAmount = usd(last.amount);
+    const [amount, amountSource] = pinned !== null
+        ? [pinned, "pinned"]
+        : estimated !== null
+            ? [estimated, "estimated"]
+            : [lastAmount, lastAmount === null ? "unknown" : "lastCharge"];
+    return {
+        id: n.id,
+        name: n.custom_name ?? service.name,
+        service: service.name,
+        active: n.active,
+        cadence: cadence(n.frequency),
+        frequency: n.frequency,
+        amount,
+        amountSource,
+        yearlyCost: typeof n.frequency === "number" && amount !== null
+            ? Math.round(amount * n.frequency * 100) / 100
+            : null,
+        category: asObj(n.transactionCategory).label,
+        serviceType: n.service_type,
+        manual: n.manual,
+        isIncome: n.isIncome,
+        startDate: n.start_date,
+        endDate: n.end_date,
+        nextBillDate: n.expected_next_bill_date,
+        nextChargeEstimate: estimated,
+        estimateFluctuates: next.chargeAmountIsEstimate,
+        lastCharge: last.date
+            ? { date: last.date, amount: lastAmount, account: accountLabel(asObj(last.account)) }
+            : null,
+        // Rocket Money's own concierge cancellation offer. Read-only here: knowing
+        // which ones RM will cancel for you is useful, filing the request is not
+        // something a tool call should be able to do by itself.
+        canSubmitCancellationRequest: n.canSubmitCancellationRequest,
+    };
+}
+/**
+ * Every recurring charge Rocket Money tracks, active and inactive alike.
+ *
+ * Inactive ones are kept and flagged rather than dropped: a subscription still
+ * listed that last charged over a year ago is exactly what a list audit is
+ * looking for, and filtering it out is what let the hand-kept record drift.
+ * `activeOnly` exists for /api/budget, which asks a narrower question - what is
+ * still being charged - and would otherwise get years of dead rows.
+ */
+export function shapeRecurring(data, opts = {}) {
     const edges = asArr(asObj(asObj(asObj(data).viewer).subscriptions).edges);
-    const subs = edges
-        .map((e) => {
-        const n = asObj(asObj(e).node);
-        const next = asObj(n.nextCharge);
+    const all = edges.map((e) => shapeSubscriptionNode(asObj(asObj(e).node)));
+    const subs = (opts.activeOnly ? all.filter((s) => s.active !== false) : all).sort((a, b) => {
+        // Active first, then soonest bill; undated rows sort last within their group
+        // instead of leading, which is what an empty string would have done.
+        if (a.active !== b.active)
+            return a.active === false ? 1 : -1;
+        const ad = String(a.nextBillDate ?? "9999-12-31");
+        const bd = String(b.nextBillDate ?? "9999-12-31");
+        return ad.localeCompare(bd);
+    });
+    return {
+        count: subs.length,
+        activeCount: subs.filter((s) => s.active !== false).length,
+        inactiveCount: subs.filter((s) => s.active === false).length,
+        subscriptions: subs,
+    };
+}
+// ── one subscription (SubscriptionDetailPage) ──────────────────────
+/**
+ * One recurring charge in full. Everything the list row carries, plus the charge
+ * history that says whether the cadence on file is the one the merchant is
+ * actually billing: RM's own yearly cost, a 12-month by-month total, and the
+ * individual transactions.
+ */
+export function shapeSubscriptionDetail(data) {
+    const n = asObj(data.node);
+    const txns = asArr(asObj(n.transactions).edges).map((e) => {
+        const t = asObj(asObj(e).node);
         return {
-            name: n.custom_name ?? asObj(n.service).name,
-            service: asObj(n.service).name,
-            active: n.active,
-            isIncome: n.isIncome,
-            category: asObj(n.transactionCategory).label,
-            nextBillDate: n.expected_next_bill_date,
-            nextChargeEstimate: usd(next.chargeAmount),
-            estimateFluctuates: next.chargeAmountIsEstimate,
+            id: t.id,
+            date: t.date,
+            amount: usd(t.amount),
+            name: t.longName ?? t.shortName,
+            pending: t.pending,
+            account: accountLabel(asObj(t.account)),
         };
-    })
-        .filter((s) => s.active !== false)
-        .sort((a, b) => String(a.nextBillDate ?? "").localeCompare(String(b.nextBillDate ?? "")));
-    return { count: subs.length, subscriptions: subs };
+    });
+    return {
+        ...shapeSubscriptionNode(n),
+        // RM's own annualized figure, which is worth keeping beside our computed
+        // yearlyCost: the two disagreeing means the cadence or the amount is wrong.
+        rocketMoneyYearlyCost: usd(n.yearlyCost),
+        transactionCount: n.transaction_count,
+        monthlyTotals: asArr(n.monthlyTransactionsBarChartData).map((b) => {
+            const p = asObj(b);
+            return { month: p.date, amount: usd(p.amountCents) };
+        }),
+        relatedSubscriptions: asArr(n.relatedSubscriptions).map((r) => {
+            const p = asObj(r);
+            return { id: p.id, name: p.custom_name ?? asObj(p.service).name };
+        }),
+        transactions: txns,
+    };
 }
 // ── upcoming charges (RecurringUpcomingPage) ───────────────────────
 export function shapeUpcoming(data) {

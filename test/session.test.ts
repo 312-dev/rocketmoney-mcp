@@ -71,7 +71,7 @@ test("saveSession persists the rotated jar; loadSession reads it back", () => {
 
 test("markSessionDead blocks loadSession until re-seeded", () => {
   seedSession("tb.auth0.sid=abc");
-  markSessionDead("HTTP 401 on SettingsAccountsPage");
+  markSessionDead("HTTP 401 on AccountDetailAccountListPage");
   assert.equal(loadSession(), null); // dead sessions don't load
   const s = sessionStatus();
   assert.equal(s.status, "dead");
