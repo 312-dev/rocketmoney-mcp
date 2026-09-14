@@ -91,7 +91,11 @@ the server itself holds a live financial session and must not be publicly reacha
 ## Notes
 
 - If a tool returns `PersistedQueryNotFound`, Rocket Money rotated a GraphQL query
-  hash; re-capture it from a fresh HAR and update `PERSISTED` in `src/rm/client.ts`.
+  hash. This happens every few weeks, because a hash is tied to one build of RM's
+  web bundle. The error names the page to re-capture from: open it with devtools
+  recording, find the `client-api.rocketmoney.com/graphql` POST whose
+  `operationName` matches, copy `extensions.persistedQuery.sha256Hash`, and update
+  `PERSISTED` in `src/rm/client.ts`.
 - Not affiliated with or endorsed by Rocket Money / Rocket Companies.
 
 ## License

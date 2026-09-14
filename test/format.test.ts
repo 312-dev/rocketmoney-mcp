@@ -20,30 +20,44 @@ test("usd converts integer cents to dollars, tolerates non-numbers", () => {
   assert.equal(usd("100"), null);
 });
 
-test("shapeAccounts flattens institutions -> accounts with displayed balance", () => {
+// RM hands back one connection per account type, each node naming its own
+// masterAccount; shapeAccounts regroups that institution-first.
+const masterChase = {
+  id: "ma1",
+  status: "connected",
+  institution: { name: "Chase" },
+};
+
+test("shapeAccounts regroups the per-type buckets under their institution", () => {
   const out = shapeAccounts({
     viewer: {
-      masterAccounts: {
+      checkingAccounts: {
         edges: [
           {
             node: {
-              status: "connected",
-              institution: { name: "Chase" },
-              accounts: {
-                edges: [
-                  {
-                    node: {
-                      id: "acc1",
-                      name: "Checking",
-                      defaultName: "CHK",
-                      customType: "checking",
-                      number: "1234",
-                      displayedBalance: 4200.5,
-                      enabled: true,
-                    },
-                  },
-                ],
-              },
+              id: "acc1",
+              name: "Checking",
+              defaultName: "CHK",
+              customType: "checking",
+              number: "1234",
+              displayedBalance: 4200.5,
+              enabled: true,
+              masterAccount: masterChase,
+            },
+          },
+        ],
+      },
+      creditAccounts: {
+        edges: [
+          {
+            node: {
+              id: "acc2",
+              name: "Sapphire",
+              customType: "credit",
+              number: "5678",
+              displayedBalance: -310,
+              enabled: true,
+              masterAccount: masterChase,
             },
           },
         ],
@@ -52,17 +66,44 @@ test("shapeAccounts flattens institutions -> accounts with displayed balance", (
   });
   assert.equal(out.institutions.length, 1);
   assert.equal(out.institutions[0].institution, "Chase");
+  assert.equal(out.institutions[0].status, "connected");
+  assert.equal(out.institutions[0].accounts.length, 2);
   assert.equal(out.institutions[0].accounts[0].name, "Checking");
   assert.equal(out.institutions[0].accounts[0].balance, 4200.5);
   assert.equal(out.institutions[0].accounts[0].mask, "1234");
+  assert.equal(out.institutions[0].accounts[1].type, "credit");
+});
+
+test("shapeAccounts lists an account once when otherAccounts repeats it", () => {
+  const node = { id: "acc1", name: "Checking", customType: "checking", masterAccount: masterChase };
+  const out = shapeAccounts({
+    viewer: {
+      checkingAccounts: { edges: [{ node }] },
+      otherAccounts: { edges: [{ node }] },
+    },
+  });
+  assert.equal(out.institutions.length, 1);
+  assert.equal(out.institutions[0].accounts.length, 1);
+});
+
+test("shapeAccounts keeps two logins at the same bank apart", () => {
+  const out = shapeAccounts({
+    viewer: {
+      savingsAccounts: {
+        edges: [
+          { node: { id: "a", masterAccount: { id: "ma1", institution: { name: "Ally" } } } },
+          { node: { id: "b", masterAccount: { id: "ma2", institution: { name: "Ally" } } } },
+        ],
+      },
+    },
+  });
+  assert.equal(out.institutions.length, 2);
 });
 
 test("shapeAccounts falls back to defaultName when name is missing", () => {
   const out = shapeAccounts({
     viewer: {
-      masterAccounts: {
-        edges: [{ node: { institution: {}, accounts: { edges: [{ node: { defaultName: "Savings" } }] } } }],
-      },
+      savingsAccounts: { edges: [{ node: { id: "acc1", defaultName: "Savings" } }] },
     },
   });
   assert.equal(out.institutions[0].accounts[0].name, "Savings");

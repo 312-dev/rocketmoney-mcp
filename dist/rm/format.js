@@ -15,30 +15,67 @@ export function usd(cents) {
 function num(v) {
     return typeof v === "number" ? v : null;
 }
-// ── accounts (SettingsAccountsPage) ────────────────────────────────
+// ── accounts (AccountDetailAccountListPage) ────────────────────────
+// RM returns the account list as one connection per account type rather than one
+// list. The type is already on each node as `customType`, so the buckets carry no
+// information beyond ordering; they only decide which nodes we have to visit.
+//
+// The buckets overlap: `otherAccounts` repeats nodes that also appear under
+// `checkingAccounts` and `savingsAccounts`, byte for byte. Visiting it last means
+// the typed buckets are what set each account's position, and the id dedupe below
+// drops the repeat. In the 2026-09-13 capture that is 20 edges over 15 accounts.
+const ACCOUNT_BUCKETS = [
+    "checkingAccounts",
+    "savingsAccounts",
+    "creditAccounts",
+    "investmentAccounts",
+    "savingsPlanAccounts",
+    "otherAccounts",
+];
+/**
+ * Group every account under the institution that holds it. Each node carries its
+ * own `masterAccount` (one linked login at one bank), which is where the
+ * institution name and the connection status live - the node's own `institution`
+ * has an id but no name. Grouping by masterAccount id keeps two logins at the
+ * same bank apart, which is the case a name-keyed grouping would merge.
+ */
 export function shapeAccounts(data) {
-    const edges = asArr(asObj(asObj(asObj(data).viewer).masterAccounts).edges);
-    const institutions = edges.map((e) => {
-        const node = asObj(asObj(e).node);
-        const inst = asObj(node.institution);
-        const accts = asArr(asObj(node.accounts).edges).map((ae) => {
-            const a = asObj(asObj(ae).node);
-            return {
+    const viewer = asObj(asObj(data).viewer);
+    const groups = new Map();
+    const seen = new Set();
+    for (const bucket of ACCOUNT_BUCKETS) {
+        for (const e of asArr(asObj(viewer[bucket]).edges)) {
+            const a = asObj(asObj(e).node);
+            if (typeof a.id === "string") {
+                if (seen.has(a.id))
+                    continue;
+                seen.add(a.id);
+            }
+            const master = asObj(a.masterAccount);
+            // Keyed on the account's own id when there is no masterAccount, so an
+            // unlinked account lands in a group of one instead of merging into a
+            // single nameless bucket with every other one.
+            const key = typeof master.id === "string" ? master.id : `account:${String(a.id)}`;
+            let group = groups.get(key);
+            if (!group) {
+                group = {
+                    institution: asObj(master.institution).name,
+                    status: master.status,
+                    accounts: [],
+                };
+                groups.set(key, group);
+            }
+            group.accounts.push({
                 id: a.id,
                 name: a.name ?? a.defaultName,
                 type: a.customType,
                 mask: a.number,
                 balance: num(a.displayedBalance),
                 enabled: a.enabled,
-            };
-        });
-        return {
-            institution: inst.name,
-            status: node.status,
-            accounts: accts,
-        };
-    });
-    return { institutions };
+            });
+        }
+    }
+    return { institutions: [...groups.values()] };
 }
 // ── account detail (AccountDetailPage) ─────────────────────────────
 export function shapeAccountDetail(data) {

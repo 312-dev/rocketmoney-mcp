@@ -14,14 +14,20 @@ const WEB_CLIENT_VERSION = process.env.ROCKETMONEY_WEB_CLIENT_VERSION ?? "2fc82a
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
 
-// Persisted-query hashes captured from app.rocketmoney.com-2.har (2026-07-05).
-// These are READ operations only. If RM rotates a hash the call returns
-// PersistedQueryNotFound and the tool surfaces a clear "re-capture" error.
+// Persisted-query hashes for the READ operations, lifted from the web app's own
+// traffic. The baseline came from app.rocketmoney.com-2.har (2026-07-05).
+//
+// A hash belongs to one build of the Rocket Money web bundle, so RM invalidates
+// some of them every few weeks and the fix is always the same: load the page in
+// CAPTURE_PAGE with devtools recording, find the POST whose operationName
+// matches, and copy extensions.persistedQuery.sha256Hash. Re-captured 2026-09-13:
+// AccountDetailAccountListPage, which replaces the retired SettingsAccountsPage
+// (RM no longer answers that operation at all), and AccountDetailPage.
 const PERSISTED = {
   AuthenticationCheck: "5fe578b1917c4601cb63948f580ad3bdadded0fefa985fdd2fe2d1b913cce2d0",
   RefreshAuthToken: "a86bd0f5e3fbc3673d1215b894362c5cd28ce060a7bb326cc9fd37b06bdd9fbb",
-  SettingsAccountsPage: "9a2d400302623749fb664756a9cb6d2068c7b9d51e6608062785c60b834cb345",
-  AccountDetailPage: "43d99c4074844dc1ec67f395e25ad0b5e5da7e60aba40d1dcd96cc162b64d634",
+  AccountDetailAccountListPage: "72975ab40c3705a74516ca9ebf4ae78876c103e409c795f2aaea8f2d283fb78a",
+  AccountDetailPage: "70347255abce45e4b1ea63edbb6dc8fc7f170b040854443bb32eb1ab6029fd2d",
   NetWorthQuery: "5d319beb9e4b601c8381198731cbdaeeba106e442c44c049e4333142db07ed11",
   SpendingPage: "26e04b9b4bcf2033891037bda8b67e43afc96684f0d734883fa1af75776f14fa",
   Budgets: "f55267f5c1dacf4bfa2c92893506f771f49e3ddc04d34fa14d21d0ffeea4dfbe",
@@ -35,6 +41,18 @@ const PERSISTED = {
   // same as any other persisted read (PersistedQueryNotFound -> re-capture).
   TransactionCategories: "b8734a0ec18579870ec0e707beca2a05450193c99e55df6f165be9d18a53e6b4",
 } as const;
+
+// Where in the web app each operation fires, so the PersistedQueryNotFound error
+// can send you straight to the page that will hand you the new hash. Only routes
+// actually observed in a capture are listed; add one the next time you watch an
+// operation go past rather than guessing it from the operation name.
+const CAPTURE_PAGE: Partial<Record<keyof typeof PERSISTED, string>> = {
+  AuthenticationCheck: "https://app.rocketmoney.com/ (fires on every page)",
+  RefreshAuthToken: "https://app.rocketmoney.com/ (fires on every page)",
+  AccountDetailAccountListPage: "https://app.rocketmoney.com/account",
+  AccountDetailPage: "https://app.rocketmoney.com/account (then click an account)",
+  NetWorthQuery: "https://app.rocketmoney.com/net-worth",
+};
 
 /** Thrown when the session is no longer authenticated (cookie expired/revoked). */
 export class RMAuthError extends Error {}
@@ -142,8 +160,14 @@ async function rmExecuteUnlocked<T = unknown>(opName: string, payload: Record<st
       throw new RMAuthError(`Rocket Money auth failed: ${authErr.message}. Re-auth at /auth.`);
     }
     if (json.errors.some((e) => /PersistedQueryNotFound/i.test(e.message))) {
+      const page =
+        CAPTURE_PAGE[opName as keyof typeof PERSISTED] ??
+        "the Rocket Money web app page that shows this data";
       throw new Error(
-        `RM ${opName}: PersistedQueryNotFound - Rocket Money rotated this query hash; re-capture it from a fresh HAR and update PERSISTED in client.ts.`,
+        `RM ${opName}: PersistedQueryNotFound - Rocket Money rotated this query hash. ` +
+          `To re-capture: with devtools recording, load ${page}, find the POST to ` +
+          `client-api.rocketmoney.com/graphql whose operationName is ${opName}, copy ` +
+          `extensions.persistedQuery.sha256Hash, and update PERSISTED in client.ts.`,
       );
     }
     throw new Error(`RM ${opName}: ${json.errors.map((e) => e.message).join("; ")}`);
@@ -248,7 +272,7 @@ export async function refreshAuthToken(): Promise<void> {
 
 /** Every institution + account with current balance. */
 export async function getAccounts(): Promise<Record<string, unknown>> {
-  return rmGraphQL({ operationName: "SettingsAccountsPage" });
+  return rmGraphQL({ operationName: "AccountDetailAccountListPage" });
 }
 
 /** One account's detail: balances, liabilities/APRs, 6-month balance history. */
