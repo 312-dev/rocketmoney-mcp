@@ -5,7 +5,7 @@ import { renderAuthPage, submitAuth, ingestAuth, authStatus, triggerLogin, postO
 import { refreshAuthToken } from "./rm/client.js";
 import { sessionStatus } from "./rm/session.js";
 import { attemptLogin, autoLoginConfigured } from "./rm/login.js";
-import { newTransactions, budgetSnapshot } from "./api.js";
+import { newTransactions, budgetSnapshot, gateNote } from "./api.js";
 const PORT = Number(process.env.PORT ?? 8080);
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -35,7 +35,7 @@ app.use(["/auth/ingest", "/auth/status", "/auth/sms"], (req, res, next) => {
 });
 app.get("/auth/status", authStatus);
 app.post("/auth/ingest", ingestAuth);
-// ── Token-guarded JSON API (last N days of transactions) ───────────
+// ── Token-guarded JSON API (transactions, budget, one fenced note write) ──
 // Auth is the ROCKETMONEY_API_TOKEN bearer/?token= check inside the handler,
 // NOT Cloudflare Access - this is meant for unattended script callers.
 // Stateless snapshot: every read returns the same lookback window. Slugs still
@@ -47,6 +47,9 @@ app.get("/api/transactions/:slug", newTransactions);
 // Budgets, recurring merchants, upcoming bills and spending in one read, for
 // the card gate on lockbox deciding whether a new Essentials charge fits.
 app.get("/api/budget", budgetSnapshot);
+// The card gate's verdict, written as a "Gate:" note onto a row nobody has
+// noted. The one write on this API; see gateNote for its fence.
+app.post("/api/gate-note/:id", gateNote);
 // ── MCP endpoint ──────────────────────────────────────────────────
 // Stateless streamable HTTP: a fresh server+transport per request, torn down on
 // socket close, so the process holds no per-connection state and Fly can recycle

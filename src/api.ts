@@ -212,3 +212,92 @@ export async function budgetSnapshot(req: Request, res: Response): Promise<void>
   logHit(req, `-> 200${Object.keys(errors).length ? ` (partial: ${Object.keys(errors).join(",")})` : ""}`);
   res.status(200).json(body);
 }
+
+
+// ── Token-guarded write: the card gate's verdict on one transaction ─────
+//
+// The only write this API offers, and it is fenced on purpose. The bearer
+// token lives on lockbox for unattended timers; if it leaks, the worst it can
+// do here is write a line starting "Gate:" into a note nobody has written.
+// A note a person typed is the stated purpose the card gate judges by, so it
+// is never replaced, and nothing else about a transaction is reachable.
+
+/** The prefix that marks a note as the card gate's own. */
+export const GATE_NOTE_PREFIX = "Gate: ";
+export const GATE_NOTE_MAX = 200;
+
+/**
+ * Whether a gate note may be written over what the row holds now.
+ * Pure, so the policy is tested without Rocket Money.
+ */
+export function gateNoteDecision(
+  current: string | null | undefined,
+  note: string,
+): { ok: true } | { ok: false; status: number; error: string } {
+  if (!note.startsWith(GATE_NOTE_PREFIX) || note.length > GATE_NOTE_MAX || note.includes("\n")) {
+    return { ok: false, status: 400, error: `note must be one line starting "${GATE_NOTE_PREFIX}", at most ${GATE_NOTE_MAX} characters` };
+  }
+  const existing = (current ?? "").trim();
+  if (existing && !existing.startsWith(GATE_NOTE_PREFIX.trim())) {
+    return { ok: false, status: 409, error: "the transaction carries a note a person wrote, which is never replaced" };
+  }
+  return { ok: true };
+}
+
+/**
+ * POST /api/gate-note/:id   body {"note": "Gate: ..."}
+ *
+ * The row must be inside the same lookback window the feed reads, which is
+ * also how its current note is learned before deciding.
+ */
+export async function gateNote(req: Request, res: Response): Promise<void> {
+  if (!authorized(req)) {
+    logHit(req, "-> 401");
+    res.status(401).json({ ok: false, error: "unauthorized" });
+    return;
+  }
+  if (/^(1|true|yes)$/i.test(process.env.ROCKETMONEY_READ_ONLY ?? "")) {
+    logHit(req, "-> 403 (read-only)");
+    res.status(403).json({ ok: false, error: "this server is read-only" });
+    return;
+  }
+  const id = String(req.params.id ?? "");
+  const note = typeof req.body?.note === "string" ? req.body.note : "";
+  const session = sessionStatus();
+  if (session.status !== "live") {
+    logHit(req, `-> 503 (session ${session.status})`);
+    res.status(503).json({ ok: false, error: "rocketmoney session not active", session: session.status });
+    return;
+  }
+  try {
+    const found = await rm.searchTransactions(null, lookbackSince(new Date()));
+    const row = found.find((t) => t.nodeId === id);
+    if (!row) {
+      logHit(req, "-> 404");
+      res.status(404).json({ ok: false, error: `no transaction with that id in the last ${LOOKBACK_DAYS} days` });
+      return;
+    }
+    const decision = gateNoteDecision(row.note, note);
+    if (!decision.ok) {
+      logHit(req, `-> ${decision.status}`);
+      res.status(decision.status).json({ ok: false, error: decision.error });
+      return;
+    }
+    if ((row.note ?? "").trim() === note.trim()) {
+      logHit(req, "-> 200 (unchanged)");
+      res.json({ ok: true, id, note, changed: false });
+      return;
+    }
+    const saved = await rm.setTransactionNote(id, note);
+    logHit(req, "-> 200 (written)");
+    res.json({ ok: true, id, note: saved, changed: true });
+  } catch (err) {
+    if (err instanceof RMAuthError) {
+      logHit(req, "-> 503 (RMAuthError)");
+      res.status(503).json({ ok: false, error: "rocketmoney session rejected", detail: err.message });
+      return;
+    }
+    console.error("[api] gate-note error:", err);
+    res.status(502).json({ ok: false, error: "upstream error", detail: String(err) });
+  }
+}
