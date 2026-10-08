@@ -139,6 +139,13 @@ the server itself holds a live financial session and must not be publicly reacha
 
 ## Notes
 
+- If **every** call returns `HTTP 401 on AuthenticationCheck`, including with a
+  brand-new cookie, the `x-truebill-web-client-version` header has gone stale --
+  not the session. The tell is that several different fresh cookies all fail
+  identically. Re-capture the value from a logged-in `app.rocketmoney.com` tab
+  (devtools -> Network -> filter `graphql` -> any request -> Request Headers)
+  and set `ROCKETMONEY_WEB_CLIENT_VERSION`, or update the default in
+  `src/rm/client.ts`.
 - If a tool returns `PersistedQueryNotFound`, Rocket Money rotated a GraphQL query
   hash. This happens every few weeks, because a hash is tied to one build of RM's
   web bundle. The error names the page to re-capture from: open it with devtools
