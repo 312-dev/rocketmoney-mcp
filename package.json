@@ -18,7 +18,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "express": "^4.21.2",
     "jmap-jam": "^0.13.2",
     "puppeteer-extra": "^3.3.6",
