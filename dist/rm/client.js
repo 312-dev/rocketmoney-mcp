@@ -11,15 +11,12 @@ const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/
 // A hash belongs to one build of the Rocket Money web bundle, so RM invalidates
 // some of them every few weeks and the fix is always the same: load the page in
 // CAPTURE_PAGE with devtools recording, find the POST whose operationName
-// matches, and copy extensions.persistedQuery.sha256Hash. Re-captured 2026-09-13:
-// AccountDetailAccountListPage, which replaces the retired SettingsAccountsPage
-// (RM no longer answers that operation at all), and AccountDetailPage.
-// SubscriptionDetailPage added 2026-09-13 from recurring.har; RecurringPage's
-// hash was unchanged in that same capture.
-// Re-captured 2026-10-27: RM moved the account list back to SettingsAccountsPage
-// on /settings/accounts and stopped answering AccountDetailAccountListPage;
-// AccountDetailPage, Budgets, RecurringPage, SpendingPage and
-// TransactionCategoryPage rotated.
+// matches, and copy extensions.persistedQuery.sha256Hash. RM renames operations
+// too, not just their hashes: the account list moved from SettingsAccountsPage to
+// AccountDetailAccountListPage in 2026-09 and back again in 2026-10, so check the
+// operationName as well. Last re-captured 2026-10-27 (AccountDetailPage, Budgets,
+// RecurringPage, SettingsAccountsPage, SpendingPage, TransactionCategoryPage);
+// SubscriptionDetailPage comes from recurring.har (2026-09-13).
 const PERSISTED = {
     AuthenticationCheck: "5fe578b1917c4601cb63948f580ad3bdadded0fefa985fdd2fe2d1b913cce2d0",
     RefreshAuthToken: "a86bd0f5e3fbc3673d1215b894362c5cd28ce060a7bb326cc9fd37b06bdd9fbb",
