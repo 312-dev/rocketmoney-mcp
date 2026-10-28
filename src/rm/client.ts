@@ -25,18 +25,22 @@ const USER_AGENT =
 // (RM no longer answers that operation at all), and AccountDetailPage.
 // SubscriptionDetailPage added 2026-09-13 from recurring.har; RecurringPage's
 // hash was unchanged in that same capture.
+// Re-captured 2026-10-27: RM moved the account list back to SettingsAccountsPage
+// on /settings/accounts and stopped answering AccountDetailAccountListPage;
+// AccountDetailPage, Budgets, RecurringPage, SpendingPage and
+// TransactionCategoryPage rotated.
 const PERSISTED = {
   AuthenticationCheck: "5fe578b1917c4601cb63948f580ad3bdadded0fefa985fdd2fe2d1b913cce2d0",
   RefreshAuthToken: "a86bd0f5e3fbc3673d1215b894362c5cd28ce060a7bb326cc9fd37b06bdd9fbb",
-  AccountDetailAccountListPage: "72975ab40c3705a74516ca9ebf4ae78876c103e409c795f2aaea8f2d283fb78a",
-  AccountDetailPage: "70347255abce45e4b1ea63edbb6dc8fc7f170b040854443bb32eb1ab6029fd2d",
+  SettingsAccountsPage: "a38ce93666f36988feb3b2bdcb60c2c8d1809e72d1a1dc505f83e66646fee0b8",
+  AccountDetailPage: "353069c04c1778a074ae9aee8398d4286a0f26d75cb1c933d17fb1ce18d2dfdf",
   NetWorthQuery: "5d319beb9e4b601c8381198731cbdaeeba106e442c44c049e4333142db07ed11",
-  SpendingPage: "26e04b9b4bcf2033891037bda8b67e43afc96684f0d734883fa1af75776f14fa",
-  Budgets: "f55267f5c1dacf4bfa2c92893506f771f49e3ddc04d34fa14d21d0ffeea4dfbe",
-  RecurringPage: "1c6519edc695c49825a35112df49ffc275bec318736e364c5991dfef6a29430f",
+  SpendingPage: "a03fc1d90df2029a330da832e2b389478e23f7318f6cfb15ef1403878a607eb7",
+  Budgets: "1f4b783aa7075191469478205ec55825ca2a37f1b8de21d11080d08dc8a0096b",
+  RecurringPage: "0026a77fc626a68877701731ac1269584c9b57881283dcaa0923372163668e1c",
   SubscriptionDetailPage: "9556941e4ff9bdc23d43801774a45e8dc01b67b547aab774abcd9815bb5b0f3c",
   RecurringUpcomingPage: "f1dd34f01b69dd0367a8b20a07b8b45977ab6d1ce0d31919b1b4143e5ba205bc",
-  TransactionCategoryPage: "1edf87cac5ca2a6428aeea4e35ae0521d0707f1e6e1fba6715ddc1d2a634fddf",
+  TransactionCategoryPage: "e69fb63dcf0c3ef5b9bd1622d03792b1798a75ea397d901b98b68a4e0d76b025",
   TransactionsPageTransactionTable:
     "5bc74a0e8d2c33efe103eeb87d6ec09d9b57fb34795597ef2e3f7d892d76a056",
   // The user's full category catalog (default + custom), with node ids. Captured
@@ -52,11 +56,14 @@ const PERSISTED = {
 const CAPTURE_PAGE: Partial<Record<keyof typeof PERSISTED, string>> = {
   AuthenticationCheck: "https://app.rocketmoney.com/ (fires on every page)",
   RefreshAuthToken: "https://app.rocketmoney.com/ (fires on every page)",
-  AccountDetailAccountListPage: "https://app.rocketmoney.com/account",
-  AccountDetailPage: "https://app.rocketmoney.com/account (then click an account)",
+  SettingsAccountsPage: "https://app.rocketmoney.com/settings/accounts",
   NetWorthQuery: "https://app.rocketmoney.com/net-worth",
+  SpendingPage: "https://app.rocketmoney.com/spending",
+  Budgets: "https://app.rocketmoney.com/budgets",
   RecurringPage: "https://app.rocketmoney.com/recurring",
   SubscriptionDetailPage: "https://app.rocketmoney.com/recurring (then click a subscription)",
+  AccountDetailPage: "https://app.rocketmoney.com/account?id=<account id from list_accounts>",
+  TransactionCategoryPage: "https://app.rocketmoney.com/spending (then click a category)",
 };
 
 /** Thrown when the session is no longer authenticated (cookie expired/revoked). */
@@ -277,7 +284,7 @@ export async function refreshAuthToken(): Promise<void> {
 
 /** Every institution + account with current balance. */
 export async function getAccounts(): Promise<Record<string, unknown>> {
-  return rmGraphQL({ operationName: "AccountDetailAccountListPage" });
+  return rmGraphQL({ operationName: "SettingsAccountsPage" });
 }
 
 /** One account's detail: balances, liabilities/APRs, 6-month balance history. */
