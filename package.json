@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "deploy": "npm run build && launchctl kickstart -k gui/$(id -u)/com.akseldkw.rocketmoney-mcp",
     "dev": "tsx watch src/index.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
