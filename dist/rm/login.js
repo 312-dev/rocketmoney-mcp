@@ -223,8 +223,8 @@ async function doLogin(reason) {
     let browser = null;
     try {
         const args = [
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
+            // Container-only flags; on macOS, Chrome keeps its sandbox.
+            ...(process.platform === "darwin" ? [] : ["--no-sandbox", "--disable-dev-shm-usage"]),
             "--disable-gpu",
             "--no-first-run",
             "--no-default-browser-check",

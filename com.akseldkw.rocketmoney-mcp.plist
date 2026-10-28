@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for this local Rocket Money MCP server (write tools enabled).
+    cp com.akseldkw.rocketmoney-mcp.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.akseldkw.rocketmoney-mcp.plist
+  Session page: http://127.0.0.1:8787/auth   MCP: http://127.0.0.1:8787/mcp
+  Node path (NODE) is nvm's: update it after switching Node versions.
+  Auto-login credentials come from the Keychain: see start.sh.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.akseldkw.rocketmoney-mcp</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>/Users/Akseldkw/coding/rocketmoney-mcp/start.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NODE</key>
+        <string>/Users/Akseldkw/.nvm/versions/node/v24.14.1/bin/node</string>
+        <key>PORT</key>
+        <string>8787</string>
+        <!-- log back in with the Keychain credentials (start.sh) when the session dies -->
+        <key>ROCKETMONEY_AUTO_LOGIN</key>
+        <string>1</string>
+        <key>CHROMIUM_PATH</key>
+        <string>/Applications/Google Chrome.app/Contents/MacOS/Google Chrome</string>
+        <!-- 30 min instead of 2 h: keeps the session warm and retries a dead one sooner -->
+        <key>ROCKETMONEY_KEEPALIVE_MS</key>
+        <string>1800000</string>
+        <key>ROCKETMONEY_STATE_DIR</key>
+        <string>/Users/Akseldkw/Library/Application Support/rocketmoney-mcp</string>
+    </dict>
+    <!-- 077: the saved session file is readable by you only -->
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/Akseldkw/Library/Logs/rocketmoney-mcp/server.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/Akseldkw/Library/Logs/rocketmoney-mcp/server.err</string>
+</dict>
+</plist>

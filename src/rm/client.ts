@@ -6,6 +6,7 @@ import {
   serializeJar,
 } from "./session.js";
 import { monthWindows, ymd, addDays } from "./windows.js";
+import { attemptLogin, autoLoginConfigured, type LoginResult } from "./login.js";
 
 const GRAPHQL_URL = "https://client-api.rocketmoney.com/graphql";
 // Captured from the web app. The exact value doesn't gate persisted-query
@@ -107,8 +108,8 @@ let rmChain: Promise<unknown> = Promise.resolve();
  */
 function rmExecute<T = unknown>(opName: string, payload: Record<string, unknown>): Promise<T> {
   const run = rmChain.then(
-    () => rmExecuteUnlocked<T>(opName, payload),
-    () => rmExecuteUnlocked<T>(opName, payload), // run even if the previous call rejected
+    () => withRelogin<T>(opName, payload),
+    () => withRelogin<T>(opName, payload), // run even if the previous call rejected
   );
   // Keep the chain alive regardless of this call's outcome (swallow here only;
   // the real result/rejection still propagates to the caller via `run`).
@@ -117,6 +118,48 @@ function rmExecute<T = unknown>(opName: string, payload: Record<string, unknown>
     () => undefined,
   );
   return run;
+}
+
+// Mark the session dead and start a re-login right away (no-op unless auto-login
+// is configured; rate-limited inside attemptLogin) instead of waiting for the
+// next keepalive tick.
+function sessionDied(reason: string): void {
+  markSessionDead(reason);
+  void attemptLogin(`session died: ${reason}`);
+}
+
+// How long a tool call waits for an auto-login before giving up: enough for a
+// warm renewal or a form login, not for an SMS round-trip (that one finishes in
+// the background and the next call succeeds).
+const RELOGIN_WAIT_MS = 90_000;
+
+/**
+ * Run a request; if it fails because the session died, wait (up to waitMs) for
+ * relogin() and, if that succeeds, run it once more - so the caller gets data
+ * instead of an auth error.
+ */
+export async function retryAfterRelogin<T>(
+  run: () => Promise<T>,
+  relogin: () => Promise<LoginResult>,
+  waitMs: number,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (!(err instanceof RMAuthError)) throw err;
+    const timeout = new Promise<LoginResult>((r) => setTimeout(() => r({ ok: false }), waitMs).unref());
+    const login = await Promise.race([relogin(), timeout]);
+    if (!login.ok) throw err;
+    return run();
+  }
+}
+
+// The executor with retryAfterRelogin when auto-login is configured. The
+// re-login is shared with the one sessionDied already started.
+function withRelogin<T>(opName: string, payload: Record<string, unknown>): Promise<T> {
+  const run = () => rmExecuteUnlocked<T>(opName, payload);
+  if (!autoLoginConfigured()) return run();
+  return retryAfterRelogin(run, () => attemptLogin(`session died during ${opName}`), RELOGIN_WAIT_MS);
 }
 
 async function rmExecuteUnlocked<T = unknown>(opName: string, payload: Record<string, unknown>): Promise<T> {
@@ -139,7 +182,7 @@ async function rmExecuteUnlocked<T = unknown>(opName: string, payload: Record<st
   });
 
   if (res.status === 401 || res.status === 403 || res.status === 302) {
-    markSessionDead(`HTTP ${res.status} on ${opName}`);
+    sessionDied(`HTTP ${res.status} on ${opName}`);
     throw new RMAuthError(`Rocket Money auth failed (HTTP ${res.status}). Re-auth at /auth.`);
   }
 
@@ -161,7 +204,7 @@ async function rmExecuteUnlocked<T = unknown>(opName: string, payload: Record<st
         /not? authenticated|unauthorized|session/i.test(e.message),
     );
     if (authErr) {
-      markSessionDead(`GraphQL: ${authErr.message}`);
+      sessionDied(`GraphQL: ${authErr.message}`);
       throw new RMAuthError(`Rocket Money auth failed: ${authErr.message}. Re-auth at /auth.`);
     }
     if (json.errors.some((e) => /PersistedQueryNotFound/i.test(e.message))) {

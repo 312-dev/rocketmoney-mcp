@@ -1,7 +1,7 @@
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer, READ_ONLY } from "./mcp.js";
-import { renderAuthPage, submitAuth, ingestAuth, authStatus, triggerLogin, postOtp, smsWebhook } from "./auth-page.js";
+import { renderAuthPage, submitAuth, triggerLogin, postOtp, smsWebhook } from "./auth-page.js";
 import { refreshAuthToken } from "./rm/client.js";
 import { sessionStatus } from "./rm/session.js";
 import { attemptLogin, autoLoginConfigured } from "./rm/login.js";
@@ -10,6 +10,20 @@ import { newTransactions, budgetSnapshot } from "./api.js";
 const PORT = Number(process.env.PORT ?? 8080);
 
 const app = express();
+
+// ── Local-only guard ───────────────────────────────────────────────
+// This build has no front door (upstream assumes Cloudflare Access), so it
+// listens on loopback only and rejects requests a web page could forge: a Host
+// other than this machine (DNS rebinding) or a cross-site Origin (CSRF).
+const LOCAL_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
+app.use((req, res, next) => {
+  const origin = req.header("origin");
+  const host = req.header("host") ?? "";
+  if (!LOCAL_HOSTS.has(host) || (origin && !LOCAL_HOSTS.has(origin.replace(/^http:\/\//, "")))) {
+    return void res.status(403).json({ ok: false, error: "local requests only" });
+  }
+  next();
+});
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 // Some SMS-forwarder apps POST the raw message as text/plain - capture it as a string.
@@ -27,18 +41,8 @@ app.post("/auth/otp", postOtp); // feed an SMS code to a parked login run
 app.post("/auth/sms", smsWebhook); // phone SMS-forwarder posts the RM code here (shared-secret guarded)
 
 // ── JSON API for the browser extension ─────────────────────────────
-// CORS is permissive: the extension service worker with host_permissions does
-// not trigger a preflight, but browser-context callers might. Auth is at the
-// Cloudflare Access edge (service token / OTP), not here.
-app.use(["/auth/ingest", "/auth/status", "/auth/sms"], (req, res, next) => {
-  res.set("Access-Control-Allow-Origin", "*");
-  res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.set("Access-Control-Allow-Headers", "content-type, x-sms-secret, cf-access-client-id, cf-access-client-secret");
-  if (req.method === "OPTIONS") return void res.status(204).end();
-  next();
-});
-app.get("/auth/status", authStatus);
-app.post("/auth/ingest", ingestAuth);
+// Removed in this local build: /auth/ingest and /auth/status were open to any
+// website (CORS *), and the session is pasted at /auth instead.
 
 // ── Token-guarded JSON API (last N days of transactions) ───────────
 // Auth is the ROCKETMONEY_API_TOKEN bearer/?token= check inside the handler,
@@ -105,6 +109,6 @@ async function keepalive(): Promise<void> {
 }
 setInterval(keepalive, KEEPALIVE_MS).unref();
 
-app.listen(PORT, () => {
-  console.log(`[rocketmoney-mcp] listening on :${PORT}  (POST /mcp, GET /auth)`);
+app.listen(PORT, "127.0.0.1", () => {
+  console.log(`[rocketmoney-mcp] listening on 127.0.0.1:${PORT}  (POST /mcp, GET /auth)`);
 });
