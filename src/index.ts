@@ -8,6 +8,8 @@ import { attemptLogin, autoLoginConfigured } from "./rm/login.js";
 import { newTransactions, budgetSnapshot } from "./api.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
+// Unset keeps the all-interfaces default; set HOST=127.0.0.1 when only a local tunnel should reach it.
+const HOST = process.env.HOST;
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -105,6 +107,6 @@ async function keepalive(): Promise<void> {
 }
 setInterval(keepalive, KEEPALIVE_MS).unref();
 
-app.listen(PORT, () => {
-  console.log(`[rocketmoney-mcp] listening on :${PORT}  (POST /mcp, GET /auth)`);
-});
+const onListen = () => console.log(`[rocketmoney-mcp] listening on ${HOST ?? ""}:${PORT}  (POST /mcp, GET /auth)`);
+if (HOST) app.listen(PORT, HOST, onListen);
+else app.listen(PORT, onListen);

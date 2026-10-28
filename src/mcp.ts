@@ -286,7 +286,7 @@ export function buildServer(): McpServer {
     {
       title: "Transactions in a category",
       description:
-        "List this month's transactions within one spending category. Pass the category node id (from spending_summary/budgets categories, or a base64 TransactionCategory id).",
+        "List this month's transactions within one spending category. Pass the category's nodeId from list_categories (a base64 TransactionCategory id), not its numeric id.",
       inputSchema: {
         category_id: z.string().describe("The TransactionCategory node id"),
       },

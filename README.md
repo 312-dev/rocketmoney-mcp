@@ -126,6 +126,7 @@ ROCKETMONEY_STATE_DIR=./.state PORT=8080 node dist/index.js
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP port |
+| `HOST` | all interfaces | Bind address; `127.0.0.1` keeps the server reachable only through a local tunnel |
 | `ROCKETMONEY_STATE_DIR` | `/data/rocketmoney` | Where the rotating session is persisted |
 | `ROCKETMONEY_READ_ONLY` | unset | `1` to leave the write tools unregistered |
 | `ROCKETMONEY_KEEPALIVE_MS` | `7200000` | Keepalive interval (2h) |
