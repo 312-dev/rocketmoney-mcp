@@ -12,7 +12,7 @@
     "start": "node dist/index.js",
     "deploy": "npm run build && launchctl kickstart -k gui/$(id -u)/com.akseldkw.rocketmoney-mcp",
     "dev": "tsx watch src/index.ts",
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "node --import tsx --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./test/tdd-guard-reporter.mjs --test-reporter-destination=stdout test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "refresh-hashes": "tsx scripts/refresh-hashes.ts"
   },

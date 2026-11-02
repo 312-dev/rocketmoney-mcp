@@ -45,6 +45,11 @@ because it names people and amounts.
 
 ## 2. Collect
 
+0. `session_status`. For each entry in `stale_connections` (an institution that stopped
+   syncing), add a review item: "Reconnect <institution> in the Rocket Money app: nothing
+   after <last_transaction> is visible". Charges on that account are missing, so a
+   repayment for one won't find its match: file it by its note and mark it `uncertain`.
+   Repeat the item every run until it's gone.
 1. Window start = the last run's date minus 7 days (pending charges settle late). For the
    first run, use 30 days ago.
 2. `search_transactions(since=<start>, date_field="original_date", limit=2000)`. Use full
@@ -54,7 +59,9 @@ because it names people and amounts.
    - `category_transactions("Venmo", since=<30 days ago>)`: anything in `Venmo` that isn't a
      transfer between my own accounts.
    - `category_transactions("Internal Transfers", since=<start>)`: incoming `Zelle payment
-     from …` that Rocket Money auto-filed there.
+     from …` that Rocket Money auto-filed there, and Venmo payments from a person (a paid
+     request lands there ignored, e.g. a `… group split` I requested). Those are
+     repayments: file them by purpose and un-ignore them.
    - Open review items from earlier log entries.
 4. Snapshot before any write:
    - `spending_summary` (category totals);

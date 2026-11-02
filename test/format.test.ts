@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   usd,
   shapeAccounts,
+  staleConnections,
+  withLastTransaction,
   shapeNetWorth,
   shapeSpending,
   shapeBudgets,
@@ -316,4 +318,33 @@ test("shapers never throw on empty/garbage input", () => {
     assert.doesNotThrow(() => fn({}));
     assert.doesNotThrow(() => fn({ viewer: null } as never));
   }
+});
+
+test("staleConnections lists institutions that stopped syncing, with their accounts", () => {
+  const out = staleConnections({
+    institutions: [
+      { institution: "Chase", status: "ok", accounts: [{ id: "a1", name: "Checking", mask: "1234" }] },
+      { institution: "Citi", status: "connected", accounts: [{ id: "a2", name: "Card", mask: "9" }] },
+      {
+        institution: "Amazon.com Store Card",
+        status: "disconnected",
+        accounts: [{ id: "a3", name: "Prime Store Card", mask: "7199" }],
+      },
+    ],
+  });
+  assert.deepEqual(out, [
+    {
+      institution: "Amazon.com Store Card",
+      status: "disconnected",
+      accounts: [{ id: "a3", name: "Prime Store Card", mask: "7199" }],
+    },
+  ]);
+});
+
+test("withLastTransaction dates each stale account's newest transaction", async () => {
+  const stale = [
+    { institution: "Amazon.com Store Card", status: "disconnected", accounts: [{ id: "a3", name: "Prime", mask: "7199" }] },
+  ];
+  const out = await withLastTransaction(stale, async (id) => (id === "a3" ? "2026-01-18" : null));
+  assert.deepEqual(out[0].accounts, [{ id: "a3", name: "Prime", mask: "7199", last_transaction: "2026-01-18" }]);
 });

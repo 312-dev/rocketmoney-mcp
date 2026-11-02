@@ -4,10 +4,18 @@ import { READ, WRITE, AUTH_HINT, READ_ONLY, tool } from "./common.js";
 import * as rm from "../rm/client.js";
 import * as fmt from "../rm/format.js";
 import { sessionStatus } from "../rm/session.js";
+/**
+ * Linked institutions that stopped syncing, each account dated by its newest transaction.
+ * A disconnected card silently drops its charges from every search, so session_status
+ * reports them up front.
+ */
+export async function staleConnectionsNow({ getAccounts = rm.getAccounts, lastDate = async (accountId) => (await rm.searchTransactionsPage({ accountIds: [accountId], limit: 1 })).transactions[0]?.date ?? null, } = {}) {
+    return fmt.withLastTransaction(fmt.staleConnections(fmt.shapeAccounts(await getAccounts())), lastDate);
+}
 export function registerAccountsTools(server, writes) {
     server.registerTool("session_status", {
         title: "Session status",
-        description: "Check whether the Rocket Money session is currently authenticated. Use this first if other tools report auth errors.",
+        description: "Check whether the Rocket Money session is currently authenticated, and list linked institutions that stopped syncing (stale_connections, with each account's last transaction date: nothing after it is visible until it's reconnected in the Rocket Money app). Use this first if other tools report auth errors, and before categorizing or matching charges.",
         inputSchema: {},
         annotations: READ,
     }, tool(async () => {
@@ -16,7 +24,8 @@ export function registerAccountsTools(server, writes) {
             return { ...local, authenticated: false, readOnly: READ_ONLY, hint: AUTH_HINT };
         // Confirm liveness against RM (also rotates the cookie).
         const viewerId = await rm.authenticationCheck();
-        return { ...local, authenticated: Boolean(viewerId), readOnly: READ_ONLY };
+        const stale_connections = await staleConnectionsNow();
+        return { ...local, authenticated: Boolean(viewerId), readOnly: READ_ONLY, stale_connections };
     }));
     server.registerTool("list_accounts", {
         title: "List accounts",

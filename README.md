@@ -26,7 +26,7 @@ cookie anywhere until you enter your own server's URL.
 
 | Tool | What it returns |
 | --- | --- |
-| `session_status` | Whether the Rocket Money session is authenticated |
+| `session_status` | Whether the Rocket Money session is authenticated, and which linked institutions stopped syncing (`stale_connections`, with each account's last transaction date) |
 | `list_accounts` | Every linked institution + account with current balance |
 | `get_account` | One account's detail: balances, credit limit, liability/APRs, balance history |
 | `net_worth` | Net worth split into cash / savings / investments / debts, with trend |

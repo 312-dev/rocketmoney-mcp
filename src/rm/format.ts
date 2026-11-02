@@ -96,6 +96,39 @@ export function shapeAccounts(data: Obj) {
   return { institutions: [...groups.values()] };
 }
 
+/** Statuses of a connection that is syncing; anything else means its transactions stop. */
+const SYNCING = new Set(["ok", "connected"]);
+
+/**
+ * Institutions from shapeAccounts whose connection isn't syncing (e.g. "disconnected").
+ * Their accounts show no new transactions until reconnected in the Rocket Money app,
+ * which silently leaves charges out of searches and categorization.
+ */
+export function staleConnections(shaped: { institutions: { institution: unknown; status: unknown; accounts: Obj[] }[] }) {
+  return shaped.institutions
+    .filter((g) => !SYNCING.has(String(g.status)))
+    .map((g) => ({
+      institution: g.institution,
+      status: g.status,
+      accounts: g.accounts.map((a) => ({ id: a.id, name: a.name, mask: a.mask })),
+    }));
+}
+
+/** staleConnections with each account's newest transaction date: where its data stops. */
+export async function withLastTransaction(
+  stale: ReturnType<typeof staleConnections>,
+  lastDate: (accountId: string) => Promise<string | null>,
+) {
+  return Promise.all(
+    stale.map(async (g) => ({
+      ...g,
+      accounts: await Promise.all(
+        g.accounts.map(async (a) => ({ ...a, last_transaction: await lastDate(String(a.id)) })),
+      ),
+    })),
+  );
+}
+
 // ── account detail (AccountDetailPage) ─────────────────────────────
 export function shapeAccountDetail(data: Obj) {
   const a = asObj(data.account);
