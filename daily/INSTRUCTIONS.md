@@ -80,6 +80,7 @@ Work through these in order. Record a confidence for each: **high**, **medium** 
 | Payment to a person | Outgoing Venmo or Zelle | Category by purpose, from the note (§4) |
 | New bill | A charge from a utility, telecom, insurer, rent, a subscription, or anything `subscriptions` / `upcoming_bills` lists, that isn't in its usual category | Its usual category: the one past charges from the same merchant use (`search_transactions(query=<merchant>)`). For a merchant with no history, the category from the merchant type (`Bills & Utilities`, a subscription category, `Rent`). |
 | Future trip or event purchase | Flights, lodging, tickets, tours, booked ahead | Re-date per §7 when the event date is known (Gmail confirmations if available). Note: `dated to <event> <YYYY-MM-DD>` |
+| Payment to a card that isn't syncing | A payment from checking to a card that `CATEGORIZATION.local.md` lists as disconnected | Its purchases never arrive, so the payment stands in for them: `Shopping` (or the card's usual category), ignore `none`, note `proxy for <card> purchases (disconnected since <date>)`. If the card reconnects with history, revert the payments the history covers to `Credit Card Payment` + `ignore: everything`. |
 | Duplicate import | Same name and amount on the same account, within 2 days, with a new id | Per §3 of `CATEGORIZATION.md`: newer copy → `Ignore`. Only when a whole stretch is doubled, never a single pair. |
 | Everything else | | Leave Rocket Money's category, unless it's clearly wrong (e.g. a restaurant in `Shopping`) |
 

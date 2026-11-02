@@ -256,6 +256,13 @@ then A2-A4 (need the rotation investigation and more care), then E.
 - [ ] **F10. Timestamped logs would close two checks** (keepalive and login re-probe)
       from the log alone. That's the backlog item "Timestamp the server log" [other agent];
       worth doing first.
+- [ ] **F11. Switched-off accounts show as raw ids** (found 2026-11-02). When an account
+      is switched off in Linked Accounts (history kept), `list_accounts` drops it and
+      `accountLabels()` (`src/rm/rows.ts`) only sees enabled accounts. Its transactions
+      still come back from `search_transactions`, but their `account` field is the base64
+      node id instead of "Institution Account 1234". Fix: include disabled accounts in the
+      `AccountLabels` query, or label them "(switched off)". Workaround: the id still
+      works in `account_ids`.
 
 ## Second sweep (2026-10-29, after PR #7)
 
