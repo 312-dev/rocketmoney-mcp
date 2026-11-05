@@ -63,10 +63,84 @@ because it names people and amounts.
      request lands there ignored, e.g. a `… group split` I requested). Those are
      repayments: file them by purpose and un-ignore them.
    - Open review items from earlier log entries.
+   - **Recurring subscriptions.** Compare the window against the "Recurring subscriptions"
+     table in `../CATEGORIZATION.local.md`. If a newer monthly Link summary email has arrived
+     (Gmail: `from:notifications@link.com subject:"transaction summary"`), read it and add any
+     merchant or price not in the table (that's a local-file edit, not a Rocket Money write;
+     log it under fixes). Under needs review, flag: a listed subscription that didn't charge
+     within 5 days of its usual day, a price change, or a new recurring merchant.
 4. Snapshot before any write:
    - `spending_summary` (category totals);
    - `list_rules` (count and ids);
    - for every transaction you might change: id, category, ignore, date, note.
+
+## 2a. Cash-flow check: will checking cover the automatic payments?
+
+Read-only; no writes. Run it every day, even when nothing else changed.
+
+1. **Balances.** `get_account(<checking id>)` for the checking balance (use `availableBalance`
+   when it's lower than `currentBalance`). `list_accounts` for every credit card's current
+   balance; `get_account` on each card with a balance for `liability` (statement balance,
+   due date) when Rocket Money has it.
+2. **Outflows from checking over the next 35 days.** Use the schedule in
+   `../CATEGORIZATION.local.md` ("Automatic payments from checking") as the list of what
+   leaves checking and roughly when, and confirm each against the last few months of
+   checking rows (`search_transactions(account_ids=[<checking id>], since=<~60 days ago>)`).
+   - **Card autopays, by billing cycle.** Each autopay pays one statement, so work out
+     which charges land in it:
+     - **Dates:** the card's statement close and autopay dates. Best source: the latest
+       Gmail notice (Amex "AutoPay Reminder" gives amount and processing date; Chase
+       "statement is available" gives due date and statement balance; Citi and others: the
+       statement-ready email date ≈ close + 1–2 days). Then `liability` from `get_account`,
+       then the usual days in the local file. A due date on a weekend or holiday pays the
+       business day before (Chase) or after (check the issuer's email).
+     - **Amount once the statement has closed:** the statement balance (email or
+       `liability`), or, failing those, the card's balance on the close date from
+       `get_account` balanceHistory. It's firm; mark the basis `statement`.
+     - **Amount before it closes:** current balance plus the card's average daily spend
+       over the last 30 days × days left until close. Mark it `estimate`. Charges after the
+       close date belong to the following payment, so don't load them onto this one.
+     - If this cycle's payment has already posted, the next one is a cycle later.
+     - **Card balances lag payments.** If a payment to the card has posted on checking
+       but the card's balance hasn't dropped, don't use the balance: add up the card's
+       charges since the last statement close instead.
+   - **Bills paid from checking:** `upcoming_bills(days=35)` for amounts and dates, keeping
+     only merchants whose past payments came from checking (bills charged to a card are
+     already inside that card's balance; don't count them twice).
+   - **Rent** on the schedule in the local file, unless that month's payment has already
+     posted.
+   - **Disconnected cards** (local file): the latest statement amount from Gmail if known,
+     otherwise the last payment.
+3. **Inflows:** count only ones that are certain and dated (a scheduled transfer you can
+   see, a payroll deposit with a regular history). Never assume a transfer from investments
+   or a pending Venmo request.
+4. **Project** the checking balance day by day and find the lowest point, its date and
+   the payment that causes it (the *breaking payment*).
+   - **At risk:** the lowest point is below $0.
+   - **Tight:** the lowest point is below the buffer in the local file (default $1,000).
+   - Otherwise **ok**.
+   - **Shortfall** = buffer − lowest point (the amount that restores the buffer).
+   - **Move-by date** = 3 business days before the breaking payment (an ACH transfer from
+     a brokerage takes 1–3 business days to land). Count bank holidays.
+5. **Notify** (push, the run's notification tool) based on dates, so a warning arrives when
+   it's actionable and isn't repeated every day for a month. Send one when any of these is
+   true, and otherwise only record the projection in the log and summary:
+   - **New:** the last log entry's result was ok (or there is none) and today's isn't.
+   - **Firm:** the breaking payment's statement closed since the last run, so its amount
+     changed from `estimate` to `statement`.
+   - **Worse:** the shortfall grew by more than $1,000 since the last notification.
+   - **Countdown:** the move-by date is 7 days away, or 2 days or less away (then daily,
+     until it's covered).
+   - **Missed:** the move-by date has passed and it's still not covered (daily, and say
+     the payment may bounce: a returned autopay can mean a returned-payment fee).
+   The first sentence of the push is the action: "Move $<shortfall, rounded up to the next
+   $500> into checking by <move-by date> (<weekday>)". Then: the breaking payment, its date
+   and amount (`firm` or `estimate`), the lowest projected balance, and the other large
+   payments before it. When a not-ok result becomes ok again (money arrived), send one
+   short "covered" push.
+
+Record the projection in the log's cash-flow section (section 7) and lead the summary
+with it when it's not ok.
 
 ## 3. Decide each transaction
 
@@ -78,7 +152,7 @@ Work through these in order. Record a confidence for each: **high**, **medium** 
 | Transfer between my own accounts | The rows in `CATEGORIZATION.md` §2 (`Standard transfer`, `VENMO CASHOUT`, `VENMO PAYMENT`), credit card payments, moves between my own bank or brokerage accounts | Category `Venmo` for the Venmo-related ones; everything else keeps Rocket Money's transfer or payment category. `ignore: everything` in both cases. |
 | Repayment of a group bill | Incoming Venmo or Zelle whose amount is the charge divided by N, or a round share of it, near a charge of mine; or a note naming it (`airbnb`, `dinner`, `… group split`) | The charge's category (§1). If the charge is in a different month, also re-date the repayment to the charge's date (§7). Note: `repays <merchant> <YYYY-MM-DD>` |
 | Payment to a person | Outgoing Venmo or Zelle | Category by purpose, from the note (§4) |
-| New bill | A charge from a utility, telecom, insurer, rent, a subscription, or anything `subscriptions` / `upcoming_bills` lists, that isn't in its usual category | Its usual category: the one past charges from the same merchant use (`search_transactions(query=<merchant>)`). For a merchant with no history, the category from the merchant type (`Bills & Utilities`, a subscription category, `Rent`). |
+| New bill | A charge from a utility, telecom, insurer, rent, a subscription, or anything `subscriptions` / `upcoming_bills` / the "Recurring subscriptions" table in `../CATEGORIZATION.local.md` lists, that isn't in its usual category | Its usual category: the one past charges from the same merchant use (`search_transactions(query=<merchant>)`). For a merchant with no history, the category from the merchant type (`Bills & Utilities`, a subscription category, `Rent`). |
 | Future trip or event purchase | Flights, lodging, tickets, tours, booked ahead | Re-date per §7 when the event date is known (Gmail confirmations if available). Note: `dated to <event> <YYYY-MM-DD>` |
 | Payment to a card that isn't syncing | A payment from checking to a card that `CATEGORIZATION.local.md` lists as disconnected | Its purchases never arrive, so the payment stands in for them: `Shopping` (or the card's usual category), ignore `none`, note `proxy for <card> purchases (disconnected since <date>)`. If the card reconnects with history, revert the payments the history covers to `Credit Card Payment` + `ignore: everything`. |
 | Duplicate import | Same name and amount on the same account, within 2 days, with a new id | Per §3 of `CATEGORIZATION.md`: newer copy → `Ignore`. Only when a whole stretch is doubled, never a single pair. |
@@ -193,6 +267,15 @@ written `YYYY-MM-DD · name · $amount · account`, plus the id where it's neede
 
 **Run:** window <start> → <end> (original_date) · <N> transactions scanned · <M> changed · session ok|failed
 
+### Cash-flow check
+**Result:** ok | tight | at risk · checking $<balance> · lowest projected $<X> on <date> (breaking payment: <name>) · shortfall $<Y> · move by <date> · notified: yes (<new|firm|worse|countdown|missed|covered>) | no
+
+| Date | Payment | Amount | Basis | Projected checking after |
+| --- | --- | --- | --- | --- |
+(every expected outflow and certain inflow in the next 35 days; basis is `statement`,
+`estimate`, `last payment`, `upcoming_bills` or `schedule`; for cards also give the
+statement close date)
+
 ### New transactions
 | Date | Name | Amount | Account | Rocket Money category | Decision |
 | --- | --- | --- | --- | --- | --- |
@@ -230,5 +313,6 @@ and its result)
 weren't changed, open questions for me.)
 ```
 
-Then reply with a summary: what changed (counts and dollars per category), everything
+Then reply with a summary: the cash-flow result first (and the amount to move into
+checking, if any), what changed (counts and dollars per category), everything
 needing review, and any rule or MCP issue.
